@@ -192,11 +192,22 @@ ipcMain.handle('provider:accept', async (_, { sessionId, data }) => {
     data.cudaRequested || false,
   );
 
-  // Start reverse SSH tunnel pointing to the container's SSH port
-  const { host, port } = await tunnel.startTunnel(parseInt(hostPort));
+  console.log(`[C3] Container up — SSH listening on host port ${hostPort}`);
 
-  // Mark session READY with SSH endpoint
+  // Start reverse SSH tunnel pointing to the container's SSH port
+  let host, port;
+  try {
+    ({ host, port } = await tunnel.startTunnel(parseInt(hostPort)));
+    console.log(`[C3] Tunnel resolved → SSH endpoint: ${host}:${port}`);
+  } catch (tunnelErr) {
+    // Tunnel completely failed — throw so provider sees the error
+    await docker.stopSession(sessionId).catch(() => {});
+    throw new Error(`Tunnel failed: ${tunnelErr.message}`);
+  }
+
+  // Mark session READY with SSH endpoint — this is what the user reads
   await dynamo.updateSessionStatus(sessionId, 'READY', { sshHost: host, sshPort: port });
+  console.log(`[C3] DynamoDB updated: sshHost=${host} sshPort=${port}`);
 
   return { host, port };
 });
