@@ -327,6 +327,8 @@ ipcMain.handle('ssh:connect', async (_, sessionId) => {
   if (!privateKeyPem) throw new Error('Session keypair not found — please reconnect.');
   if (!session.sshHost || !session.sshPort) throw new Error('Session not ready — no SSH endpoint.');
 
+  console.log(`[C3] Connecting SSH → ${session.sshHost}:${session.sshPort}`);
+
   await ssh.connect(
     session.sshHost,
     session.sshPort,
@@ -335,7 +337,8 @@ ipcMain.handle('ssh:connect', async (_, sessionId) => {
     ()     => send('ssh:close', null),
   );
 
-  await ssh.openSftp();
+  // SFTP is optional — open in background so the terminal isn't blocked by it
+  ssh.openSftp().catch(e => console.warn('[C3] SFTP init failed (non-fatal):', e.message));
   ssh.startTelemetry((m) => send('ssh:telemetry', m));
   return true;
 });
