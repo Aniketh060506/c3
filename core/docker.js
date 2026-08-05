@@ -20,31 +20,31 @@ const IMAGE_MAP = {
  * shell-injection / quote-escaping issues with echo '...'.
  */
 function buildStartupScript() {
-  // The public key is injected via ENV, not inline in the shell script.
-  // This avoids every escaping problem.
+  // Injected via ENV to avoid shell escaping issues
   return ['/bin/bash', '-c', [
     'export DEBIAN_FRONTEND=noninteractive',
     'apt-get update -qq',
     'apt-get install -y -qq openssh-server',
-    'mkdir -p /var/run/sshd',
-    // Create c3user
+    'mkdir -p /var/run/sshd /run/sshd',
+    'ssh-keygen -A', // Generate host SSH keys (CRITICAL — without this sshd crashes instantly)
+    // Create c3user if missing
     'id -u c3user >/dev/null 2>&1 || useradd -m -s /bin/bash c3user',
-    // Set up root SSH
+    // Set up root SSH authorized_keys
     'mkdir -p /root/.ssh && chmod 700 /root/.ssh',
     'echo "$C3_PUBKEY" > /root/.ssh/authorized_keys',
     'chmod 600 /root/.ssh/authorized_keys',
-    // Set up c3user SSH
+    // Set up c3user SSH authorized_keys
     'mkdir -p /home/c3user/.ssh && chmod 700 /home/c3user/.ssh',
     'echo "$C3_PUBKEY" > /home/c3user/.ssh/authorized_keys',
     'chmod 600 /home/c3user/.ssh/authorized_keys',
     'chown -R c3user:c3user /home/c3user/.ssh',
-    // Harden sshd_config
-    'echo "PermitRootLogin yes"          >> /etc/ssh/sshd_config',
-    'echo "PubkeyAuthentication yes"     >> /etc/ssh/sshd_config',
-    'echo "PasswordAuthentication no"    >> /etc/ssh/sshd_config',
+    // Configure sshd_config
+    'echo "PermitRootLogin yes"                  >> /etc/ssh/sshd_config',
+    'echo "PubkeyAuthentication yes"             >> /etc/ssh/sshd_config',
+    'echo "PasswordAuthentication no"            >> /etc/ssh/sshd_config',
     'echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config',
-    'echo "StrictModes no"               >> /etc/ssh/sshd_config',
-    // Start sshd in foreground
+    'echo "StrictModes no"                       >> /etc/ssh/sshd_config',
+    // Run sshd in foreground
     '/usr/sbin/sshd -D -e',
   ].join(' && ')];
 }

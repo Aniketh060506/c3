@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { DynamoDBClient, PutItemCommand, UpdateItemCommand, QueryCommand, ScanCommand, GetItemCommand } = require('@aws-sdk/client-dynamodb');
+
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 const { getCredentials } = require('./cognito');
 
@@ -66,24 +67,40 @@ async function heartbeat(userId) {
 
 async function getActiveProviders() {
   const client = getClient();
-  const twoMinutesAgo = Math.floor(Date.now() / 1000) - 120;
   
-  const command = new QueryCommand({
+  const command = new ScanCommand({
     TableName: 'c3_providers',
-    IndexName: 'status-index',
-    KeyConditionExpression: '#status = :s AND lastHeartbeat > :ts',
+    FilterExpression: '#status = :s',
     ExpressionAttributeNames: {
       '#status': 'status'
     },
     ExpressionAttributeValues: marshall({
-      ':s': 'ACTIVE',
-      ':ts': twoMinutesAgo
+      ':s': 'ACTIVE'
     })
   });
   
-  const response = await client.send(command);
-  return response.Items ? response.Items.map(item => unmarshall(item)) : [];
+  try {
+    const response = await client.send(command);
+    const items = response.Items ? response.Items.map(item => unmarshall(item)) : [];
+    const nowSec = Math.floor(Date.now() / 1000);
+    
+    // Allow heartbeat within last 10 minutes (600s) or fallback if heartbeat missing
+    const activeItems = items.filter(item => {
+      if (!item.lastHeartbeat) return true;
+      const hb = typeof item.lastHeartbeat === 'string' ? parseInt(item.lastHeartbeat, 10) : item.lastHeartbeat;
+      // Handle millisecond vs second timestamps
+      const hbSec = hb > 10_000_000_000 ? Math.floor(hb / 1000) : hb;
+      return (nowSec - hbSec) < 600;
+    });
+
+    console.log(`[C3 Dynamo] getActiveProviders → found ${activeItems.length} active nodes (out of ${items.length} total active status)`);
+    return activeItems;
+  } catch (e) {
+    console.error('[C3 Dynamo] getActiveProviders failed:', e.message);
+    return [];
+  }
 }
+
 
 async function createSessionRequest(sessionData) {
   const client = getClient();

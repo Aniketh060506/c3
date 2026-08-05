@@ -143,18 +143,27 @@ ipcMain.handle('provider:register', async (_, profile) => {
 
 ipcMain.handle('provider:toggle', async (_, active) => {
   const userId = getUserId();
-  await dynamo.updateProviderStatus(userId, active ? 'ACTIVE' : 'INACTIVE').catch(() => {});
+  console.log(`[C3] provider:toggle → ${active} for userId=${userId}`);
+
+  await dynamo.updateProviderStatus(userId, active ? 'ACTIVE' : 'INACTIVE')
+    .then(() => console.log('[C3] DynamoDB status updated successfully'))
+    .catch(e => console.error('[C3] DynamoDB updateProviderStatus FAILED:', e.message));
 
   if (active) {
+    // Immediately write a fresh heartbeat so lastHeartbeat is current
+    await dynamo.heartbeat(userId)
+      .then(() => console.log('[C3] Initial heartbeat written'))
+      .catch(e => console.error('[C3] Heartbeat FAILED:', e.message));
+
     if (!heartbeatTimer) {
-      heartbeatTimer = setInterval(() => dynamo.heartbeat(userId).catch(() => {}), 60_000);
+      heartbeatTimer = setInterval(() => dynamo.heartbeat(userId).catch(e => console.error('[C3] heartbeat err:', e.message)), 60_000);
     }
     if (!pendingPollTimer) {
       pendingPollTimer = setInterval(async () => {
         try {
           const reqs = await dynamo.getPendingRequestsForProvider(userId);
           if (reqs.length > 0) send('provider:newreq', reqs[0]);
-        } catch (_) {}
+        } catch (e) { console.error('[C3] pendingPoll err:', e.message); }
       }, 5_000);
     }
   } else {
@@ -209,7 +218,16 @@ ipcMain.handle('provider:end', async (_, sessionId) => {
 // MARKETPLACE HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-ipcMain.handle('market:providers', async () => dynamo.getActiveProviders().catch(() => []));
+ipcMain.handle('market:providers', async () => {
+  try {
+    const list = await dynamo.getActiveProviders();
+    console.log('[C3] market:providers returning', list.length, 'nodes');
+    return list;
+  } catch (e) {
+    console.error('[C3] market:providers ERROR:', e.message);
+    return [];
+  }
+});
 
 ipcMain.handle('market:request', async (_, payload) => {
   const userId = getUserId();

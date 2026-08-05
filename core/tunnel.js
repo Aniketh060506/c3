@@ -14,14 +14,14 @@ async function startTunnel(localPort) {
     conn.on('ready', () => {
       retryCount = 0; // Reset retries on successful connection
       
-      conn.forwardIn('serveo.net', 0, (err, port) => {
+      conn.forwardIn('', 0, (err, port) => {
         if (err || !port) {
           console.warn('[C3 Tunnel] Serveo bind failed, falling back to local connection:', err?.message);
           conn.end();
           return resolve({ host: '127.0.0.1', port: localPort });
         }
         
-        console.log(`Tunnel established: serveo.net:${port} -> localhost:${localPort}`);
+        console.log(`[C3 Tunnel] Established: serveo.net:${port} -> localhost:${localPort}`);
         resolve({ host: 'serveo.net', port: port });
       });
     });

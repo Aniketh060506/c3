@@ -71,13 +71,22 @@ export default function ProviderTab({ user, active, setActive }) {
     return () => { if (elRef.current) clearInterval(elRef.current); };
   }, [activeSession]);
 
-  const toggleActive = () => {
+  const toggleActive = async () => {
     const n = !active;
     setActive(n); // updates App-level state + localStorage immediately
-    if (window.c3?.toggleStatus) {
-      window.c3.toggleStatus(n)
-        .then(() => console.log('[C3] Provider status set to', n ? 'ACTIVE' : 'INACTIVE'))
-        .catch(err => console.error('[C3] toggleStatus failed:', err));
+    if (window.c3) {
+      try {
+        if (n && registered) {
+          // Re-register with full specs when going online to ensure DynamoDB has full hardware profile
+          await window.c3.registerProvider({ ...profile, ...specs, score });
+        }
+        if (window.c3.toggleStatus) {
+          await window.c3.toggleStatus(n);
+        }
+        console.log('[C3] Provider status set to', n ? 'ACTIVE' : 'INACTIVE');
+      } catch (err) {
+        console.error('[C3] toggleActive failed:', err);
+      }
     }
   };
 
@@ -269,23 +278,23 @@ export default function ProviderTab({ user, active, setActive }) {
 
           ) : !registered ? (
             /* REGISTER FORM */
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <div style={{ width: '100%', maxWidth: 640, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 24, padding: '40px 44px' }}>
-                <div style={{ marginBottom: 32 }}>
-                  <div style={{ fontWeight: 900, fontSize: 26, letterSpacing: '-0.8px', marginBottom: 8 }}>Register Your Node</div>
-                  <div style={{ fontSize: 15, color: '#71717a', lineHeight: 1.6 }}>Set a name for your node so users can find it in the marketplace. You'll start earning C3 credits for every accepted session.</div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflowY: 'auto', padding: '10px 0' }}>
+              <div style={{ width: '100%', maxWidth: 600, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 24, padding: '24px 30px' }}>
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontWeight: 900, fontSize: 22, letterSpacing: '-0.6px', marginBottom: 6 }}>Register Your Node</div>
+                  <div style={{ fontSize: 13, color: '#71717a', lineHeight: 1.5 }}>Set a name for your node so users can find it in the marketplace. You'll start earning C3 credits for every accepted session.</div>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   <div>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', textTransform: 'uppercase', letterSpacing: '0.9px', marginBottom: 8 }}>Node Display Name</div>
-                    <input className="input" style={{ fontSize: 16, padding: '14px 16px' }} placeholder="e.g. Aniketh's RTX Beast" value={profile.displayName} onChange={e => setProfile(p => ({ ...p, displayName: e.target.value }))} />
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', textTransform: 'uppercase', letterSpacing: '0.9px', marginBottom: 6 }}>Node Display Name</div>
+                    <input className="input" style={{ fontSize: 14, padding: '10px 14px' }} placeholder="e.g. Aniketh's RTX Beast" value={profile.displayName} onChange={e => setProfile(p => ({ ...p, displayName: e.target.value }))} />
                   </div>
                   <div>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', textTransform: 'uppercase', letterSpacing: '0.9px', marginBottom: 8 }}>Location</div>
-                    <input className="input" style={{ fontSize: 16, padding: '14px 16px' }} placeholder="e.g. Mumbai, India" value={profile.location} onChange={e => setProfile(p => ({ ...p, location: e.target.value }))} />
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', textTransform: 'uppercase', letterSpacing: '0.9px', marginBottom: 6 }}>Location</div>
+                    <input className="input" style={{ fontSize: 14, padding: '10px 14px' }} placeholder="e.g. Mumbai, India" value={profile.location} onChange={e => setProfile(p => ({ ...p, location: e.target.value }))} />
                   </div>
-                  <button className="btn btn-primary" style={{ fontSize: 15, padding: '14px 28px', marginTop: 8, alignSelf: 'flex-start', display: 'flex', alignItems: 'center', gap: 10 }} onClick={handleRegister} disabled={registering || !profile.displayName.trim()}>
-                    {registering ? <div style={{ width: 18, height: 18, border: '2px solid rgba(0,0,0,0.2)', borderTopColor: '#000', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} /> : '🚀'}
+                  <button className="btn btn-primary" style={{ fontSize: 14, padding: '12px 24px', marginTop: 4, alignSelf: 'flex-start', display: 'flex', alignItems: 'center', gap: 8 }} onClick={handleRegister} disabled={registering || !profile.displayName.trim()}>
+                    {registering ? <div style={{ width: 16, height: 16, border: '2px solid rgba(0,0,0,0.2)', borderTopColor: '#000', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} /> : '🚀'}
                     Register My Node → Earn Credits
                   </button>
                 </div>
