@@ -1,0 +1,62 @@
+{
+  "name": "c3-agent",
+  "version": "2.0.0",
+  "description": "C3 Community Compute Cloud — Peer-to-Peer GPU & CPU Sharing",
+  "main": "main.js",
+  "scripts": {
+    "dev": "concurrently \"vite src --config vite.config.js\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "build-ui": "vite build src --config vite.config.js",
+    "build": "npm run build-ui && electron-builder",
+    "start": "electron ."
+  },
+  "build": {
+    "appId": "com.c3.compute",
+    "productName": "C3 Compute",
+    "directories": {
+      "output": "dist-exe"
+    },
+    "win": {
+      "target": "dir"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "core/**",
+      "dist-ui/**",
+      "aws-config.json",
+      "node_modules/**"
+    ],
+    "asar": true
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.600.0",
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/credential-providers": "^3.600.0",
+    "@aws-sdk/util-dynamodb": "^3.600.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "dockerode": "^4.0.2",
+    "node-forge": "^1.3.1",
+    "ssh2": "^1.15.0",
+    "systeminformation": "^5.22.11",
+    "uuid": "^9.0.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^32.0.1",
+    "electron-builder": "^24.13.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.3.4",
+    "wait-on": "^7.2.0"
+  },
+  "allowScripts": {
+    "electron@32.3.3": true,
+    "ssh2@1.17.0": true,
+    "esbuild@0.21.5": true,
+    "protobufjs@7.6.5": true
+  }
+}
