@@ -26,7 +26,7 @@ function buildStartupScript() {
     'apt-get update -qq',
     'apt-get install -y -qq openssh-server',
     'mkdir -p /var/run/sshd /run/sshd',
-    'ssh-keygen -A', // Generate host SSH keys (CRITICAL — without this sshd crashes instantly)
+    'ssh-keygen -A', // Generate host SSH keys
     // Create c3user if missing
     'id -u c3user >/dev/null 2>&1 || useradd -m -s /bin/bash c3user',
     // Set up root SSH authorized_keys
@@ -44,8 +44,8 @@ function buildStartupScript() {
     'echo "PasswordAuthentication no"            >> /etc/ssh/sshd_config',
     'echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config',
     'echo "StrictModes no"                       >> /etc/ssh/sshd_config',
-    // Run sshd in foreground
-    '/usr/sbin/sshd -D -e',
+    // Auto-restart loop: if sshd restarts or drops connection, container stays ALIVE forever
+    'while true; do /usr/sbin/sshd -D -e; sleep 1; done',
   ].join(' && ')];
 }
 
@@ -63,21 +63,33 @@ async function ensureImage(image) {
 
 /**
  * Wait until sshd is actually listening on the host port.
- * Polls every second, up to maxWaitMs (default 120s for first-time apt-get).
+ * Polls cleanly without abruptly killing the SSH handshake.
  */
-async function waitForSshd(hostPort, maxWaitMs = 120_000) {
+async function waitForSshd(container, hostPort, maxWaitMs = 120_000) {
   const net = require('net');
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     await new Promise(r => setTimeout(r, 1500));
+    
+    // Check if container is alive
+    try {
+      const info = await container.inspect();
+      if (!info.State.Running) {
+        throw new Error(`Container exited with code ${info.State.ExitCode}`);
+      }
+    } catch (e) {
+      if (e.message.includes('exited')) throw e;
+    }
+
     const alive = await new Promise(resolve => {
       const s = net.connect({ host: '127.0.0.1', port: parseInt(hostPort) }, () => {
-        s.destroy();
+        s.end(); // Clean end instead of brutal destroy
         resolve(true);
       });
       s.on('error', () => resolve(false));
-      s.setTimeout(1000, () => { s.destroy(); resolve(false); });
+      s.setTimeout(1500, () => { s.end(); resolve(false); });
     });
+    
     if (alive) {
       console.log(`[C3 Docker] sshd ready on port ${hostPort} after ${Date.now() - start}ms`);
       return;
@@ -125,7 +137,7 @@ async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, 
   await container.start();
 
   // Actively wait for sshd to accept connections (not a blind sleep)
-  await waitForSshd(hostPort);
+  await waitForSshd(container, hostPort);
 
   return { container, hostPort };
 }
