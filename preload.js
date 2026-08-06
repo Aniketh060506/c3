@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('c3', {
   onChatMessages:   (cb) => { ipcRenderer.on('chat:messages',     (_, d) => cb(d)); },
   onSessionReady:   (cb) => { ipcRenderer.on('session:ready',     (_, d) => cb(d)); },
   onNewRequest:     (cb) => { ipcRenderer.on('provider:newreq',   (_, d) => cb(d)); },
+  onDebugLog:       (cb) => { ipcRenderer.on('debug:log',         (_, d) => cb(d)); },
   removeListeners:  (ch) => { ipcRenderer.removeAllListeners(ch); },
 
 });

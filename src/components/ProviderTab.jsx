@@ -45,6 +45,10 @@ export default function ProviderTab({ user, active, setActive }) {
   const elRef = useRef(null);
   const [registering, setRegistering] = useState(false);
   const [chatTarget, setChatTarget]   = useState(null);
+  const [accepting,  setAccepting]    = useState(false);
+  const [acceptLogs, setAcceptLogs]   = useState([]);   // live step log
+  const [acceptErr,  setAcceptErr]    = useState(null);
+  const logsRef = useRef(null);
 
   useEffect(() => {
     if (!window.c3) return;
@@ -109,9 +113,41 @@ export default function ProviderTab({ user, active, setActive }) {
   };
 
   const acceptReq = async (req) => {
-    if (window.c3?.acceptRequest) { try { await window.c3.acceptRequest(req.sessionId, req); } catch (e) { alert(e.message); return; } }
-    setPending(p => p.filter(r => r.sessionId !== req.sessionId));
-    setSession(req);
+    setAccepting(true);
+    setAcceptErr(null);
+    setAcceptLogs([{
+      ts: new Date().toISOString().slice(11,23),
+      level: 'step', msg: '▶ Accept pressed — starting session setup…'
+    }]);
+
+    // Subscribe to debug:log IPC from main process
+    if (window.c3?.onDebugLog) {
+      window.c3.removeListeners('debug:log');
+      window.c3.onDebugLog((line) => {
+        setAcceptLogs(prev => [...prev, line]);
+        // auto-scroll
+        setTimeout(() => logsRef.current?.scrollTo({ top: 9999, behavior: 'smooth' }), 50);
+      });
+    }
+
+    try {
+      await window.c3.acceptRequest(req.sessionId, req);
+      setAcceptLogs(prev => [...prev, {
+        ts: new Date().toISOString().slice(11,23),
+        level: 'ok', msg: '🎉 Session is READY — user can now connect!'
+      }]);
+      setPending(p => p.filter(r => r.sessionId !== req.sessionId));
+      setSession(req);
+    } catch (e) {
+      setAcceptErr(e.message);
+      setAcceptLogs(prev => [...prev, {
+        ts: new Date().toISOString().slice(11,23),
+        level: 'error', msg: '❌ Failed: ' + e.message
+      }]);
+    } finally {
+      setAccepting(false);
+      if (window.c3?.removeListeners) window.c3.removeListeners('debug:log');
+    }
   };
 
   const declineReq = (req) => {
@@ -241,6 +277,43 @@ export default function ProviderTab({ user, active, setActive }) {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* ── LIVE ACCEPT PROGRESS PANEL ── */}
+          {(accepting || acceptLogs.length > 0) && !activeSession && (
+            <div style={{
+              flexShrink: 0,
+              background: acceptErr ? 'rgba(239,68,68,0.05)' : accepting ? 'rgba(59,130,246,0.05)' : 'rgba(34,197,94,0.05)',
+              border: `1px solid ${acceptErr ? 'rgba(239,68,68,0.25)' : accepting ? 'rgba(59,130,246,0.25)' : 'rgba(34,197,94,0.25)'}`,
+              borderLeft: `4px solid ${acceptErr ? '#ef4444' : accepting ? '#3b82f6' : '#22c55e'}`,
+              borderRadius: 16, padding: '18px 22px',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                {accepting && <div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid rgba(59,130,246,0.3)', borderTopColor: '#3b82f6', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />}
+                <span style={{ fontWeight: 800, fontSize: 14, color: acceptErr ? '#f87171' : accepting ? '#60a5fa' : '#34d399' }}>
+                  {acceptErr ? '❌ Setup Failed' : accepting ? '⚙️ Setting up session…' : '✅ Session Ready!'}
+                </span>
+                <button onClick={() => { setAcceptLogs([]); setAcceptErr(null); }}
+                  style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>✕</button>
+              </div>
+              <div ref={logsRef} style={{ maxHeight: 220, overflowY: 'auto', fontFamily: 'monospace', fontSize: 11.5, lineHeight: 1.75, background: 'rgba(0,0,0,0.3)', borderRadius: 10, padding: '10px 14px' }}>
+                {acceptLogs.map((line, i) => {
+                  const C = { step: '#60a5fa', ok: '#34d399', info: '#94a3b8', warn: '#fbbf24', error: '#f87171' };
+                  const I = { step: '⏳', ok: '✅', info: '  ', warn: '⚠️', error: '❌' };
+                  return (
+                    <div key={i} style={{ display: 'flex', gap: 8, color: C[line.level] || '#94a3b8', padding: '1px 0', borderLeft: line.level === 'error' ? '2px solid #ef4444' : line.level === 'ok' ? '2px solid #22c55e' : '2px solid transparent', paddingLeft: 6 }}>
+                      <span style={{ color: '#374151', flexShrink: 0 }}>{line.ts}</span>
+                      <span style={{ flexShrink: 0 }}>{I[line.level] || ' '}</span>
+                      <span style={{ wordBreak: 'break-all' }}>{line.msg}{line.detail && <span style={{ color: '#4b5563', marginLeft: 6 }}>{line.detail}</span>}</span>
+                    </div>
+                  );
+                })}
+                {accepting && <div style={{ color: '#3b82f6', marginTop: 2 }}>▋ waiting for response…</div>}
+              </div>
+              {acceptErr && pending.length > 0 && (
+                <button className="btn btn-primary" style={{ marginTop: 12, fontSize: 12, padding: '6px 16px' }} onClick={() => acceptReq(pending[0])}>🔄 Retry</button>
+              )}
             </div>
           )}
 

@@ -3,7 +3,9 @@ import AuthScreen from './components/AuthScreen';
 import UserTab from './components/UserTab';
 import ProviderTab from './components/ProviderTab';
 import SettingsModal from './components/SettingsModal';
+import DebugPanel from './components/DebugPanel';
 import './index.css';
+
 
 
 /* ── Error Boundary ── */
@@ -36,6 +38,8 @@ export default function App() {
     catch { return false; }
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [showDebug,    setShowDebug]    = useState(false);
+
 
   const setProviderActiveAndPersist = (val) => {
     setProviderActive(val);
@@ -136,11 +140,16 @@ export default function App() {
           ))}
         </div>
 
-        {/* Right: credits + avatar */}
+        {/* Right: credits + debug + avatar */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <div style={{ padding: '6px 14px', borderRadius: 100, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', fontSize: 13, color: '#f59e0b', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
             ⚡ <span>{credits}</span> <span style={{ fontWeight: 400, color: '#71717a' }}>credits</span>
           </div>
+          {/* Debug button */}
+          <button onClick={() => setShowDebug(true)} title="Debug Log (Ctrl+Shift+D)"
+            style={{ padding: '6px 12px', borderRadius: 100, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', fontSize: 12, color: '#f87171', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}>
+            🐛 Debug
+          </button>
           <div onClick={() => setShowSettings(true)} title="Account Settings"
             style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', border: '2px solid rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 15, cursor: 'pointer', transition: 'all 0.15s', letterSpacing: '-0.5px' }}
             onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.13)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.25)'; }}
@@ -174,6 +183,7 @@ export default function App() {
           onClose={() => setShowSettings(false)}
         />
       )}
+      <DebugPanel show={showDebug} onClose={() => setShowDebug(false)} />
 
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>

@@ -72,9 +72,18 @@ function send(channel, data) {
   }
 }
 
+// ── Helper: broadcast a debug log line to the debug panel in the UI ─────────
+function debugLog(level, msg, detail = '') {
+  const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+  const line = { ts, level, msg, detail };
+  console.log(`[C3 ${level.toUpperCase()}] ${msg}${detail ? ' | ' + detail : ''}`);
+  send('debug:log', line);
+}
+
 function getUserId() {
   return cognito.getUserId() || activeUserId || 'anonymous_user';
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUTH HANDLERS
@@ -179,40 +188,72 @@ ipcMain.handle('provider:pending', async () => {
 });
 
 ipcMain.handle('provider:accept', async (_, { sessionId, data }) => {
+  debugLog('info',  '▶ Provider Accept started', `sessionId=${sessionId}`);
+
+  // ── Step 1: Docker running? ───────────────────────────────────────
+  debugLog('step', '⌛ Step 1/4: Checking Docker Desktop...');
   const dockerOk = await docker.isDockerRunning();
-  if (!dockerOk) throw new Error('Docker Desktop is not running. Please start Docker Desktop first.');
+  if (!dockerOk) {
+    const e = 'Docker Desktop is not running. Please start Docker Desktop first.';
+    debugLog('error', '❌ Docker not running', e);
+    throw new Error(e);
+  }
+  debugLog('ok', '✅ Docker Desktop is running');
 
-  // ── Step 1: Start container (sshd runs inside, no host port binding) ────────
-  await docker.startSession(
-    sessionId,
-    data.environment   || 'base',
-    data.cpuCores      || 2,
-    data.ramGb         || 4,
-    data.publicKey     || '',
-    data.cudaRequested || false,
-  );
-  console.log(`[C3] Container c3-${sessionId} up — sshd ready inside`);
+  // ── Step 2: Start container ──────────────────────────────────────
+  debugLog('step', `⌛ Step 2/4: Starting Docker container... (image: c3-base:latest)`);
+  debugLog('info', `  env=${data.environment || 'base'}  cpu=${data.cpuCores || 2}  ram=${data.ramGb || 4}GB  cuda=${data.cudaRequested || false}`);
+  try {
+    await docker.startSession(
+      sessionId,
+      data.environment   || 'base',
+      data.cpuCores      || 2,
+      data.ramGb         || 4,
+      data.publicKey     || '',
+      data.cudaRequested || false,
+    );
+    debugLog('ok', '✅ Container started + sshd ready inside');
+  } catch (err) {
+    debugLog('error', '❌ Container/sshd start failed', err.message);
+    throw err;
+  }
 
-  // ── Step 2: Start Serveo tunnel FROM INSIDE the container (Linux) ───────────
-  // Running the tunnel from inside Linux bypasses:
-  //   - Windows Firewall (no inbound ports needed)
-  //   - Docker Desktop WSL2 IP confusion (no getLanIp() call)
-  //   - Campus network port 22 blocks (we also try port 443 as fallback)
+  // ── Step 3: Start in-container Serveo tunnel ──────────────────────
+  debugLog('step', '⌛ Step 3/4: Pre-flight internet check inside container...');
   let host, port;
   try {
+    // Monkey-patch console.log to also send to UI during tunnel phase
+    const origLog = console.log;
+    const origWarn = console.warn;
+    console.log  = (...a) => { origLog(...a);  debugLog('info',  a.join(' ')); };
+    console.warn = (...a) => { origWarn(...a); debugLog('warn',  a.join(' ')); };
+
     ({ host, port } = await containerTunnel.startContainerTunnel(sessionId));
-    console.log(`[C3] Tunnel ready → ${host}:${port}`);
+
+    console.log  = origLog;
+    console.warn = origWarn;
+
+    debugLog('ok', `✅ Tunnel established → ${host}:${port}`);
   } catch (tunnelErr) {
+    debugLog('error', '❌ Tunnel FAILED', tunnelErr.message);
     await docker.stopSession(sessionId).catch(() => {});
     throw new Error(`Container tunnel failed: ${tunnelErr.message}`);
   }
 
-  // ── Step 3: Write endpoint to DynamoDB so user can connect ──────────────────
-  await dynamo.updateSessionStatus(sessionId, 'READY', { sshHost: host, sshPort: port });
-  console.log(`[C3] DynamoDB updated: sshHost=${host} sshPort=${port}`);
+  // ── Step 4: Write READY to DynamoDB ────────────────────────────
+  debugLog('step', '⌛ Step 4/4: Writing READY to DynamoDB...');
+  try {
+    await dynamo.updateSessionStatus(sessionId, 'READY', { sshHost: host, sshPort: port });
+    debugLog('ok', `✅ Session READY in DynamoDB → ${host}:${port}`);
+    debugLog('ok', '🎉 User can now connect!');
+  } catch (dbErr) {
+    debugLog('error', '❌ DynamoDB update failed', dbErr.message);
+    throw dbErr;
+  }
 
   return { host, port };
 });
+
 
 ipcMain.handle('provider:decline', async (_, sessionId) => {
   // Update DynamoDB first so the user-side poll sees DECLINED immediately
