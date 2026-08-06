@@ -197,7 +197,7 @@ ipcMain.handle('provider:accept', async (_, { sessionId, data }) => {
   // Start reverse SSH tunnel pointing to the container's SSH port
   let host, port;
   try {
-    ({ host, port } = await tunnel.startTunnel(parseInt(hostPort)));
+    ({ host, port } = await tunnel.startTunnel(parseInt(hostPort), sessionId));
     console.log(`[C3] Tunnel resolved → SSH endpoint: ${host}:${port}`);
   } catch (tunnelErr) {
     // Tunnel completely failed — throw so provider sees the error
