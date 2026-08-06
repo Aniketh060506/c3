@@ -10,7 +10,7 @@ const cognito  = require('./core/cognito');
 const dynamo   = require('./core/dynamodb');
 const hardware = require('./core/hardware');
 const docker   = require('./core/docker');
-const tunnel   = require('./core/tunnel');
+const containerTunnel = require('./core/container-tunnel');
 const ssh      = require('./core/ssh');
 const keypair  = require('./core/keypair');
 
@@ -182,8 +182,8 @@ ipcMain.handle('provider:accept', async (_, { sessionId, data }) => {
   const dockerOk = await docker.isDockerRunning();
   if (!dockerOk) throw new Error('Docker Desktop is not running. Please start Docker Desktop first.');
 
-  // Start container with SSH server — returns { container, hostPort }
-  const { hostPort } = await docker.startSession(
+  // ── Step 1: Start container (sshd runs inside, no host port binding) ────────
+  await docker.startSession(
     sessionId,
     data.environment   || 'base',
     data.cpuCores      || 2,
@@ -191,21 +191,23 @@ ipcMain.handle('provider:accept', async (_, { sessionId, data }) => {
     data.publicKey     || '',
     data.cudaRequested || false,
   );
+  console.log(`[C3] Container c3-${sessionId} up — sshd ready inside`);
 
-  console.log(`[C3] Container up — SSH listening on host port ${hostPort}`);
-
-  // Start reverse SSH tunnel pointing to the container's SSH port
+  // ── Step 2: Start Serveo tunnel FROM INSIDE the container (Linux) ───────────
+  // Running the tunnel from inside Linux bypasses:
+  //   - Windows Firewall (no inbound ports needed)
+  //   - Docker Desktop WSL2 IP confusion (no getLanIp() call)
+  //   - Campus network port 22 blocks (we also try port 443 as fallback)
   let host, port;
   try {
-    ({ host, port } = await tunnel.startTunnel(parseInt(hostPort), sessionId));
-    console.log(`[C3] Tunnel resolved → SSH endpoint: ${host}:${port}`);
+    ({ host, port } = await containerTunnel.startContainerTunnel(sessionId));
+    console.log(`[C3] Tunnel ready → ${host}:${port}`);
   } catch (tunnelErr) {
-    // Tunnel completely failed — throw so provider sees the error
     await docker.stopSession(sessionId).catch(() => {});
-    throw new Error(`Tunnel failed: ${tunnelErr.message}`);
+    throw new Error(`Container tunnel failed: ${tunnelErr.message}`);
   }
 
-  // Mark session READY with SSH endpoint — this is what the user reads
+  // ── Step 3: Write endpoint to DynamoDB so user can connect ──────────────────
   await dynamo.updateSessionStatus(sessionId, 'READY', { sshHost: host, sshPort: port });
   console.log(`[C3] DynamoDB updated: sshHost=${host} sshPort=${port}`);
 

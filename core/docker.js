@@ -9,46 +9,23 @@ async function isDockerRunning() {
 
 // Real public images — no Docker Hub login needed
 const IMAGE_MAP = {
-  'base':        'ubuntu:22.04',
+  'base':        'c3-base:latest',          // our custom pre-built image (openssh-server + client)
   'ai':          'pytorch/pytorch:2.3.0-cuda11.8-cudnn8-runtime',
   'datascience': 'jupyter/datascience-notebook:latest',
 };
 
-/**
- * Build the container startup command.
- * We write the public key via an env var (C3_PUBKEY) to completely avoid
- * shell-injection / quote-escaping issues with echo '...'.
- */
-function buildStartupScript() {
-  // Injected via ENV to avoid shell escaping issues
-  return ['/bin/bash', '-c', [
-    // Skip apt-get if openssh-server is already installed (makes container startup INSTANT!)
-    'if ! command -v sshd >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -y -qq openssh-server; fi',
-    'mkdir -p /var/run/sshd /run/sshd',
-    'ssh-keygen -A', // Generate host SSH keys if missing
-    // Create c3user if missing
-    'id -u c3user >/dev/null 2>&1 || useradd -m -s /bin/bash c3user',
-    // Set up root SSH authorized_keys
-    'mkdir -p /root/.ssh && chmod 700 /root/.ssh',
-    'echo "$C3_PUBKEY" > /root/.ssh/authorized_keys',
-    'chmod 600 /root/.ssh/authorized_keys',
-    // Set up c3user SSH authorized_keys
-    'mkdir -p /home/c3user/.ssh && chmod 700 /home/c3user/.ssh',
-    'echo "$C3_PUBKEY" > /home/c3user/.ssh/authorized_keys',
-    'chmod 600 /home/c3user/.ssh/authorized_keys',
-    'chown -R c3user:c3user /home/c3user/.ssh',
-    // Configure sshd_config
-    'echo "PermitRootLogin yes"                  >> /etc/ssh/sshd_config',
-    'echo "PubkeyAuthentication yes"             >> /etc/ssh/sshd_config',
-    'echo "PasswordAuthentication no"            >> /etc/ssh/sshd_config',
-    'echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config',
-    'echo "StrictModes no"                       >> /etc/ssh/sshd_config',
-    // Auto-restart loop: if sshd restarts or drops connection, container stays ALIVE forever
-    'while true; do /usr/sbin/sshd -D -e; sleep 1; done',
-  ].join(' && ')];
-}
-
 async function ensureImage(image) {
+  // For our custom c3-base image, check if it exists locally (built from Dockerfile)
+  if (image === 'c3-base:latest') {
+    const images = await docker.listImages({ filters: { reference: ['c3-base'] } });
+    if (images.length === 0) {
+      throw new Error(
+        'c3-base Docker image not found. Run: docker build -t c3-base ./docker/base'
+      );
+    }
+    return;
+  }
+
   const images = await docker.listImages({ filters: { reference: [image] } });
   if (images.length === 0) {
     console.log(`[C3 Docker] Pulling ${image} ...`);
@@ -61,25 +38,22 @@ async function ensureImage(image) {
 }
 
 /**
- * Wait until sshd inside the container sends an actual SSH-2.0 banner.
+ * Wait until sshd inside the container is accepting SSH connections.
+ * Uses docker exec to run a quick TCP check rather than exposing a host port.
  *
- * CRITICAL: Docker's internal proxy starts listening on the host port IMMEDIATELY
- * when the container starts — even before sshd is installed. A plain TCP open
- * check returns true instantly (proxy is listening) but sshd may not be ready
- * for another 60+ seconds (while apt-get installs openssh-server inside).
- *
- * We must wait for the real SSH-2.0 banner from sshd, not just TCP connectivity.
+ * We run: nc -z localhost 22 (netcat) inside the container to verify sshd is up.
  */
-async function waitForSshd(container, hostPort, maxWaitMs = 180_000) {
-  const net   = require('net');
-  const start = Date.now();
-  let attempt = 0;
+async function waitForSshd(container, maxWaitMs = 120_000) {
+  const start   = Date.now();
+  let attempt   = 0;
+
+  console.log('[C3 Docker] Waiting for sshd inside container...');
 
   while (Date.now() - start < maxWaitMs) {
     attempt++;
     await new Promise(r => setTimeout(r, 2000));
 
-    // Verify container is still running
+    // Make sure container is still alive
     try {
       const info = await container.inspect();
       if (!info.State.Running) {
@@ -87,56 +61,43 @@ async function waitForSshd(container, hostPort, maxWaitMs = 180_000) {
       }
     } catch (e) {
       if (e.message.includes('exited')) throw e;
-      // inspect error (transient) — keep polling
     }
 
-    // Probe for actual SSH banner (SSH-2.0-OpenSSH...)
-    const sshReady = await new Promise(resolve => {
-      let received = '';
-      const s = net.connect({ host: '127.0.0.1', port: parseInt(hostPort) });
-
-      s.setTimeout(3000);
-
-      s.on('connect', () => {
-        // sshd sends its banner immediately on connect — just listen
-      });
-
-      s.on('data', (chunk) => {
-        received += chunk.toString();
-        if (received.includes('SSH-')) {
-          console.log(`[C3 Docker] SSH banner received: ${received.trim()}`);
-          s.destroy();
-          resolve(true);
-        }
-      });
-
-      s.on('timeout', () => { s.destroy(); resolve(false); });
-      s.on('error',   () => { resolve(false); });
-      s.on('close',   () => { resolve(false); });
+    // Check sshd via exec: bash -c 'cat /dev/tcp/localhost/22' or nc
+    const ready = await new Promise(async resolve => {
+      try {
+        const exec = await container.exec({
+          Cmd: ['/bin/bash', '-c', 'echo "" > /dev/tcp/localhost/22 2>/dev/null && echo OK'],
+          AttachStdout: true,
+          AttachStderr: false,
+        });
+        const stream = await exec.start({ hijack: true, stdin: false });
+        let out = '';
+        stream.on('data', chunk => { out += chunk.toString(); });
+        stream.on('end', () => resolve(out.includes('OK')));
+        stream.on('error', () => resolve(false));
+        setTimeout(() => resolve(false), 3000);
+      } catch { resolve(false); }
     });
 
-    if (sshReady) {
-      console.log(`[C3 Docker] ✅ sshd confirmed ready on :${hostPort} after ${Math.round((Date.now() - start) / 1000)}s (${attempt} probes)`);
+    if (ready) {
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      console.log(`[C3 Docker] ✅ sshd ready inside container after ${elapsed}s (${attempt} probes)`);
       return;
     }
 
     const elapsed = Math.round((Date.now() - start) / 1000);
-    console.log(`[C3 Docker] ⏳ Probe #${attempt}: sshd not ready yet on :${hostPort} (${elapsed}s elapsed — apt-get may still be running)`);
+    console.log(`[C3 Docker] ⏳ Probe #${attempt}: sshd not ready yet (${elapsed}s elapsed)`);
   }
 
-  throw new Error(`sshd did not send SSH banner within ${maxWaitMs / 1000}s — apt-get may have failed inside container`);
+  throw new Error(`sshd not ready after ${maxWaitMs / 1000}s`);
 }
-
 
 async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, cudaRequested) {
   const image = IMAGE_MAP[environment] || IMAGE_MAP['base'];
   await ensureImage(image);
 
-  // Dynamic host port: 3000-3999 range based on sessionId hash to avoid conflicts
-  const portOffset = parseInt(sessionId.replace(/-/g, '').slice(0, 4), 16) % 1000;
-  const hostPort   = String(3000 + portOffset);
-
-  // Force-remove any existing container with same name (prevents 409 Conflict)
+  // Force-remove any existing container with same name
   try {
     const existing = docker.getContainer(`c3-${sessionId}`);
     await existing.stop({ t: 1 }).catch(() => {});
@@ -146,15 +107,16 @@ async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, 
   const containerConfig = {
     Image: image,
     name:  `c3-${sessionId}`,
-    Cmd:   buildStartupScript(),
-    // Inject public key via ENV — safe, no escaping issues
+    // Inject public key via ENV — safe, no shell escaping issues
     Env: [`C3_PUBKEY=${publicKey || ''}`],
     ExposedPorts: { '22/tcp': {} },
     HostConfig: {
       CpuQuota:  cpuCores * 100_000,
       CpuPeriod: 100_000,
       Memory:    ramGb * 1024 * 1024 * 1024,
-      PortBindings: { '22/tcp': [{ HostPort: hostPort }] },
+      // NO host port binding needed!
+      // The tunnel runs from inside the container via Serveo.
+      // sshd on port 22 is only accessed via the container-internal Serveo tunnel.
     },
   };
 
@@ -164,11 +126,12 @@ async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, 
 
   const container = await docker.createContainer(containerConfig);
   await container.start();
+  console.log(`[C3 Docker] Container c3-${sessionId} started`);
 
-  // Actively wait for sshd to accept connections (not a blind sleep)
-  await waitForSshd(container, hostPort);
+  // Wait for sshd to be ready inside the container
+  await waitForSshd(container);
 
-  return { container, hostPort };
+  return { container };
 }
 
 async function stopSession(sessionId) {
