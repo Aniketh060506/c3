@@ -9,15 +9,46 @@ let currentProxyServer  = null; // Node.js TCP proxy server
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Get this machine's real LAN IP (Wi-Fi / Ethernet card), skipping
+ * Docker, WSL2, Hyper-V and any other virtual adapter.
+ *
+ * Priority: 192.168.x.x (home Wi-Fi) → 10.x.x.x → anything else non-virtual.
+ * Excluded:  172.16-31.x.x (Docker bridge / WSL2), 169.254.x.x (link-local),
+ *            interfaces whose name contains docker / wsl / hyper-v / vmware.
+ */
 function getLanIp() {
   const ifaces = os.networkInterfaces();
-  for (const iface of Object.values(ifaces)) {
-    for (const alias of iface) {
-      if (alias.family === 'IPv4' && !alias.internal) return alias.address;
+  const candidates = [];
+
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    const n = name.toLowerCase();
+    // Skip virtual / container adapters by interface name
+    if (n.includes('docker') || n.includes('wsl') || n.includes('hyper-v') ||
+        n.includes('vethernet') || n.includes('vmware') || n.includes('virtualbox') ||
+        n.includes('loopback')) continue;
+
+    for (const alias of addrs) {
+      if (alias.family !== 'IPv4' || alias.internal) continue;
+      const [a, b] = alias.address.split('.').map(Number);
+
+      // Skip link-local (169.254.x.x)
+      if (a === 169 && b === 254) continue;
+      // Skip Docker/WSL private range (172.16.0.0 – 172.31.255.255)
+      if (a === 172 && b >= 16 && b <= 31) continue;
+
+      // Prioritise home-network ranges
+      const priority = (a === 192 && b === 168) ? 1
+                     : (a === 10)               ? 2
+                     :                            3;
+      candidates.push({ ip: alias.address, priority });
     }
   }
-  return null;
+
+  candidates.sort((x, y) => x.priority - y.priority);
+  return candidates[0]?.ip ?? null;
 }
+
 
 /** Best-effort Windows Firewall rule (silently ignores failures — needs admin). */
 function addFirewallRule(port, tag) {
