@@ -50,8 +50,10 @@ contextBridge.exposeInMainWorld('c3', {
   onTerminalData:   (cb) => { ipcRenderer.on('ssh:data',          (_, d) => cb(d)); },
   onTerminalClose:  (cb) => { ipcRenderer.on('ssh:close',         (_, d) => cb(d)); },
   onTelemetry:      (cb) => { ipcRenderer.on('ssh:telemetry',     (_, d) => cb(d)); },
+  onSSHProgress:    (cb) => { ipcRenderer.on('ssh:progress',      (_, d) => cb(d)); },
   onChatMessages:   (cb) => { ipcRenderer.on('chat:messages',     (_, d) => cb(d)); },
   onSessionReady:   (cb) => { ipcRenderer.on('session:ready',     (_, d) => cb(d)); },
   onNewRequest:     (cb) => { ipcRenderer.on('provider:newreq',   (_, d) => cb(d)); },
   removeListeners:  (ch) => { ipcRenderer.removeAllListeners(ch); },
+
 });

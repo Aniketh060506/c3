@@ -327,21 +327,41 @@ ipcMain.handle('ssh:connect', async (_, sessionId) => {
   if (!privateKeyPem) throw new Error('Session keypair not found — please reconnect.');
   if (!session.sshHost || !session.sshPort) throw new Error('Session not ready — no SSH endpoint.');
 
-  console.log(`[C3] Connecting SSH → ${session.sshHost}:${session.sshPort}`);
+  const { sshHost, sshPort } = session;
+  console.log(`[C3] Connecting SSH → ${sshHost}:${sshPort}`);
 
+  // ── Real TCP probe ────────────────────────────────────────────────────────
+  // Test if we can actually reach the port before wasting 20s on SSH timeout
+  send('ssh:progress', { step: 'tcp', host: sshHost, port: sshPort });
+  const tcpOk = await new Promise(resolve => {
+    const s = require('net').connect(parseInt(sshPort), sshHost);
+    s.setTimeout(5000);
+    s.on('connect', () => { s.destroy(); resolve(true); });
+    s.on('timeout', () => { s.destroy(); resolve(false); });
+    s.on('error',   () => resolve(false));
+  });
+  if (!tcpOk) throw new Error(
+    `Cannot reach ${sshHost}:${sshPort} (TCP timeout). ` +
+    'Make sure both devices are on the same Wi-Fi network and Windows Firewall is not blocking the port.'
+  );
+
+  // ── SSH handshake ─────────────────────────────────────────────────────────
+  send('ssh:progress', { step: 'handshake' });
   await ssh.connect(
-    session.sshHost,
-    session.sshPort,
+    sshHost,
+    parseInt(sshPort),
     privateKeyPem,
     (data) => send('ssh:data',  data),
     ()     => send('ssh:close', null),
+    (step) => send('ssh:progress', { step }), // auth / shell progress
   );
 
-  // SFTP is optional — open in background so the terminal isn't blocked by it
+  // SFTP is optional — open in background so the terminal isn't blocked
   ssh.openSftp().catch(e => console.warn('[C3] SFTP init failed (non-fatal):', e.message));
   ssh.startTelemetry((m) => send('ssh:telemetry', m));
   return true;
 });
+
 
 ipcMain.handle('ssh:disconnect', async () => {
   ssh.stopTelemetry();

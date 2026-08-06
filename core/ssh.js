@@ -10,7 +10,7 @@ let telemetryInterval = null;
  * Try one SSH connection attempt with the given username.
  * Returns a resolved Promise on success, rejects on error/timeout.
  */
-function tryOnce(host, port, username, privateKeyPem, onData, onClose, timeoutMs) {
+function tryOnce(host, port, username, privateKeyPem, onData, onClose, onProgress, timeoutMs) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     let settled = false;
@@ -23,8 +23,10 @@ function tryOnce(host, port, username, privateKeyPem, onData, onClose, timeoutMs
     };
 
     conn.on('ready', () => {
+      if (onProgress) onProgress('auth'); // handshake done, authenticating shell
       conn.shell({ term: 'xterm-256color', cols: 220, rows: 50 }, (err, stream) => {
         if (err) return done(false, err);
+        if (onProgress) onProgress('shell');
         sshStream = stream;
         stream
           .on('data',  (d) => { if (onData)  onData(d.toString()); })
@@ -40,11 +42,10 @@ function tryOnce(host, port, username, privateKeyPem, onData, onClose, timeoutMs
 
     conn.connect({
       host,
-      port:         parseInt(port),
+      port,
       username,
       privateKey:   privateKeyPem,
       readyTimeout: timeoutMs,
-      // Acceptable algorithms — match what ubuntu openssh supports
       algorithms: {
         kex: [
           'ecdh-sha2-nistp256',
@@ -61,12 +62,12 @@ function tryOnce(host, port, username, privateKeyPem, onData, onClose, timeoutMs
 
 /**
  * Connect with retry + username fallback.
- * Tries c3user, then root, each up to MAX_ATTEMPTS times with increasing wait.
+ * Tries root and c3user, up to MAX_ATTEMPTS times.
  */
-async function connect(host, port, privateKeyPem, onData, onClose) {
+async function connect(host, port, privateKeyPem, onData, onClose, onProgress) {
   const USERS        = ['root', 'c3user'];
-  const MAX_ATTEMPTS = 5;
-  const TIMEOUT_MS   = 20000; // 20 seconds per attempt
+  const MAX_ATTEMPTS = 2;   // 2 total — fail fast so UI shows error quickly
+  const TIMEOUT_MS   = 8000; // 8 seconds per attempt
 
   let lastErr = null;
 
@@ -74,24 +75,24 @@ async function connect(host, port, privateKeyPem, onData, onClose) {
     for (const user of USERS) {
       try {
         console.log(`[C3 SSH] Attempt ${attempt}/${MAX_ATTEMPTS} as ${user}@${host}:${port}`);
-        const conn = await tryOnce(host, port, user, privateKeyPem, onData, onClose, TIMEOUT_MS);
+        const conn = await tryOnce(host, port, user, privateKeyPem, onData, onClose, onProgress, TIMEOUT_MS);
         sshConn = conn;
-        console.log(`[C3 SSH] Connected as ${user}@${host}:${port}`);
+        console.log(`[C3 SSH] ✅ Connected as ${user}@${host}:${port}`);
         return true;
       } catch (err) {
         lastErr = err;
-        console.warn(`[C3 SSH] Failed (${user}): ${err.message}`);
+        console.warn(`[C3 SSH] ✗ Failed (${user}): ${err.message}`);
       }
     }
     if (attempt < MAX_ATTEMPTS) {
-      const wait = attempt * 2000; // 2s, 4s, 6s, 8s backoff
-      console.log(`[C3 SSH] Retrying in ${wait / 1000}s…`);
-      await new Promise(r => setTimeout(r, wait));
+      console.log('[C3 SSH] Retrying in 2s…');
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 
   throw lastErr || new Error('SSH connection failed after all retries');
 }
+
 
 function sendInput(text) {
   if (sshStream) sshStream.write(text);
