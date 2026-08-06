@@ -87,15 +87,15 @@ function tryServeoTunnel(localPort, timeoutMs = 12000) {
  * to any machine other than the provider itself.
  */
 async function startTunnel(localPort) {
-  // Try Serveo
+  // Try Serveo with a fast 4s timeout
   try {
-    const result = await tryServeoTunnel(localPort, 15000);
+    const result = await tryServeoTunnel(localPort, 4000);
     return result;
   } catch (serveoErr) {
-    console.warn('[C3 Tunnel] Serveo failed:', serveoErr.message);
+    console.warn('[C3 Tunnel] Serveo failed/timed out:', serveoErr.message);
   }
 
-  // LAN IP fallback (works when provider and user are on the same network)
+  // LAN IP fallback (works instantly when provider and user are on the same network)
   const lanIp = getLanIp();
   if (lanIp) {
     console.log(`[C3 Tunnel] Using LAN IP fallback: ${lanIp}:${localPort}`);

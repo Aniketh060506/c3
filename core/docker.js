@@ -22,11 +22,10 @@ const IMAGE_MAP = {
 function buildStartupScript() {
   // Injected via ENV to avoid shell escaping issues
   return ['/bin/bash', '-c', [
-    'export DEBIAN_FRONTEND=noninteractive',
-    'apt-get update -qq',
-    'apt-get install -y -qq openssh-server',
+    // Skip apt-get if openssh-server is already installed (makes container startup INSTANT!)
+    'if ! command -v sshd >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -y -qq openssh-server; fi',
     'mkdir -p /var/run/sshd /run/sshd',
-    'ssh-keygen -A', // Generate host SSH keys
+    'ssh-keygen -A', // Generate host SSH keys if missing
     // Create c3user if missing
     'id -u c3user >/dev/null 2>&1 || useradd -m -s /bin/bash c3user',
     // Set up root SSH authorized_keys
@@ -62,42 +61,72 @@ async function ensureImage(image) {
 }
 
 /**
- * Wait until sshd is actually listening on the host port.
- * Polls cleanly without abruptly killing the SSH handshake.
+ * Wait until sshd inside the container sends an actual SSH-2.0 banner.
+ *
+ * CRITICAL: Docker's internal proxy starts listening on the host port IMMEDIATELY
+ * when the container starts — even before sshd is installed. A plain TCP open
+ * check returns true instantly (proxy is listening) but sshd may not be ready
+ * for another 60+ seconds (while apt-get installs openssh-server inside).
+ *
+ * We must wait for the real SSH-2.0 banner from sshd, not just TCP connectivity.
  */
-async function waitForSshd(container, hostPort, maxWaitMs = 120_000) {
-  const net = require('net');
+async function waitForSshd(container, hostPort, maxWaitMs = 180_000) {
+  const net   = require('net');
   const start = Date.now();
+  let attempt = 0;
+
   while (Date.now() - start < maxWaitMs) {
-    await new Promise(r => setTimeout(r, 1500));
-    
-    // Check if container is alive
+    attempt++;
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Verify container is still running
     try {
       const info = await container.inspect();
       if (!info.State.Running) {
-        throw new Error(`Container exited with code ${info.State.ExitCode}`);
+        throw new Error(`Container exited prematurely (code ${info.State.ExitCode})`);
       }
     } catch (e) {
       if (e.message.includes('exited')) throw e;
+      // inspect error (transient) — keep polling
     }
 
-    const alive = await new Promise(resolve => {
-      const s = net.connect({ host: '127.0.0.1', port: parseInt(hostPort) }, () => {
-        s.end(); // Clean end instead of brutal destroy
-        resolve(true);
+    // Probe for actual SSH banner (SSH-2.0-OpenSSH...)
+    const sshReady = await new Promise(resolve => {
+      let received = '';
+      const s = net.connect({ host: '127.0.0.1', port: parseInt(hostPort) });
+
+      s.setTimeout(3000);
+
+      s.on('connect', () => {
+        // sshd sends its banner immediately on connect — just listen
       });
-      s.on('error', () => resolve(false));
-      s.setTimeout(1500, () => { s.end(); resolve(false); });
+
+      s.on('data', (chunk) => {
+        received += chunk.toString();
+        if (received.includes('SSH-')) {
+          console.log(`[C3 Docker] SSH banner received: ${received.trim()}`);
+          s.destroy();
+          resolve(true);
+        }
+      });
+
+      s.on('timeout', () => { s.destroy(); resolve(false); });
+      s.on('error',   () => { resolve(false); });
+      s.on('close',   () => { resolve(false); });
     });
-    
-    if (alive) {
-      console.log(`[C3 Docker] sshd ready on port ${hostPort} after ${Date.now() - start}ms`);
+
+    if (sshReady) {
+      console.log(`[C3 Docker] ✅ sshd confirmed ready on :${hostPort} after ${Math.round((Date.now() - start) / 1000)}s (${attempt} probes)`);
       return;
     }
-    console.log(`[C3 Docker] Waiting for sshd on :${hostPort}…`);
+
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    console.log(`[C3 Docker] ⏳ Probe #${attempt}: sshd not ready yet on :${hostPort} (${elapsed}s elapsed — apt-get may still be running)`);
   }
-  throw new Error(`sshd did not start within ${maxWaitMs / 1000}s`);
+
+  throw new Error(`sshd did not send SSH banner within ${maxWaitMs / 1000}s — apt-get may have failed inside container`);
 }
+
 
 async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, cudaRequested) {
   const image = IMAGE_MAP[environment] || IMAGE_MAP['base'];
