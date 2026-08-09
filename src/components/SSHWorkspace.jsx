@@ -96,57 +96,41 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
 
         setStatus('Connecting P2P channel...');
 
+        // Load ICE config dynamically (includes TURN servers if configured)
+        const iceServers = await window.c3.getIceConfig().catch(() => [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ]);
+
+        // Use trickle: true to match the Provider side
+        const answerSignals = [];
+        let answerFlushed = false;
+
         const peer = new SimplePeer({
           initiator: false,
-          trickle: false,
-          config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' },
-              { urls: 'stun:stun2.l.google.com:19302' },
-              { urls: 'stun:stun3.l.google.com:19302' },
-              { urls: 'stun:global.stun.twilio.com:3478' },
-              { urls: 'stun:stun.services.mozilla.com' },
-              {
-                urls: 'turn:openrelay.metered.ca:80',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-              },
-              {
-                urls: 'turn:openrelay.metered.ca:443',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-              },
-              {
-                urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-              }
-            ]
-          }
+          trickle: true,
+          config: { iceServers }
         });
         peerRef.current = peer;
 
-        let answerSent = false;
 
-        const sendAnswerData = (answerData) => {
-          if (answerSent) return;
-          answerSent = true;
-          console.log('[WebRTC User] Answer generated, sending to provider...');
-          window.c3.sendUserAnswer({ sessionId, answer: JSON.stringify(answerData) });
+        const flushAnswer = () => {
+          if (answerFlushed) return;
+          answerFlushed = true;
+          console.log(`[WebRTC User] Flushing ${answerSignals.length} answer signal(s) to DynamoDB`);
+          window.c3.sendUserAnswer({ sessionId, answer: JSON.stringify(answerSignals) });
         };
 
-        peer.on('signal', answerData => {
-          sendAnswerData(answerData);
+        peer.on('signal', data => {
+          answerSignals.push(data);
+          if (data.type === 'answer') {
+            // Wait 1.5s to batch trickle candidates
+            setTimeout(flushAnswer, 1500);
+          }
         });
 
-        // Safeguard timeout: If candidate gathering takes > 3.5s, force answer with gathered candidates
-        setTimeout(() => {
-          if (!answerSent && peer._pc && peer._pc.localDescription) {
-            console.log('[WebRTC User] STUN gathering 3.5s timeout hit — forcing answer emission');
-            sendAnswerData(peer._pc.localDescription);
-          }
-        }, 3500);
+        // Safety: flush after 4s no matter what
+        setTimeout(flushAnswer, 4000);
 
         peer.on('connect', () => {
           console.log('[WebRTC User] Connected to provider!');
@@ -200,7 +184,14 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
           setErrorMsg(err.message);
         });
 
-        peer.signal(JSON.parse(res.offer));
+        // Feed the provider's offer signals to the peer
+        // The offer is an array of signals (offer + candidates)
+        const offerSignals = JSON.parse(res.offer);
+        if (Array.isArray(offerSignals)) {
+          offerSignals.forEach(sig => peer.signal(sig));
+        } else {
+          peer.signal(offerSignals);
+        }
 
       } catch (e) {
         console.error("Failed to connect WebRTC terminal:", e);

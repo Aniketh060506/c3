@@ -3,5 +3,6 @@
   "userPoolId": "ap-south-1_pdrrzpX1O",
   "clientId": "4sohhllca4iu0o20eqlipal4la",
   "clientSecret": "19kh7o61nkj5ht1gtqpmdadr4007uln227ijq91ov4nuj1dsjn1k",
-  "identityPoolId": "ap-south-1:9a6d43ef-b630-43d5-85d1-f84cae3af492"
+  "identityPoolId": "ap-south-1:9a6d43ef-b630-43d5-85d1-f84cae3af492",
+  "turnServers": []
 }

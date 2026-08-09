@@ -50,6 +50,9 @@ contextBridge.exposeInMainWorld('c3', {
   onWebRTCOffer:      (cb) => { ipcRenderer.on('webrtc:offer', (_, d) => cb(d)); },
   sendUserAnswer:     (data) => ipcRenderer.invoke('webrtc:user-answer', data),
 
+  // ── WebRTC ICE Config ─────────────────────────────────────────────────────────
+  getIceConfig:        ()                       => ipcRenderer.invoke('ice:config'),
+
   // ── File Transfer ─────────────────────────────────────────────────────────────
   pickFileForUpload:   ()                       => ipcRenderer.invoke('file:pick-upload'),
   saveDownloadedFile:  (data)                   => ipcRenderer.invoke('file:save-download', data),

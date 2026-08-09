@@ -447,6 +447,22 @@ ipcMain.handle('provider:end', async (_, sessionId) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ICE / TURN CONFIG
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const awsConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'aws-config.json'), 'utf8'));
+
+ipcMain.handle('ice:config', async () => {
+  const base = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+  ];
+  const turnServers = awsConfig.turnServers || [];
+  return [...base, ...turnServers];
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MARKETPLACE HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
