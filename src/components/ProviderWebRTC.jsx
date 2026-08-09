@@ -12,7 +12,9 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
     
     sessionIdRef.current = sessionId;
 
-    setStatus('Gathering network STUN candidates...');
+    setStatus('Gathering network candidates...');
+
+    let offerSent = false;
 
     // Instantiate SimplePeer as INITIATOR immediately on mount
     const peer = new SimplePeer({
@@ -23,8 +25,6 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
           { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' },
           { urls: 'stun:stun.services.mozilla.com' },
           {
             urls: 'turn:openrelay.metered.ca:80',
@@ -46,7 +46,9 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
     });
     peerRef.current = peer;
 
-    peer.on('signal', data => {
+    const sendOfferData = (data) => {
+      if (offerSent) return;
+      offerSent = true;
       console.log('[WebRTC] Provider generated offer, storing in DynamoDB...');
       setStatus('Offer saved to DynamoDB — waiting for user answer...');
       window.c3.sendProviderOffer({ sessionId, offer: JSON.stringify(data) })
@@ -54,7 +56,19 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
           console.error('[WebRTC] Failed to send offer:', err);
           setErrorMsg('Failed to store offer: ' + err.message);
         });
+    };
+
+    peer.on('signal', data => {
+      sendOfferData(data);
     });
+
+    // Safeguard timeout: If candidate gathering takes > 3.5s, force offer with gathered candidates
+    const offerTimer = setTimeout(() => {
+      if (!offerSent && peer._pc && peer._pc.localDescription) {
+        console.log('[WebRTC] STUN gathering 3.5s timeout hit — forcing offer emission');
+        sendOfferData(peer._pc.localDescription);
+      }
+    }, 3500);
 
     peer.on('connect', () => {
       setStatus('Connected via WebRTC (P2P encrypted)');
@@ -145,6 +159,7 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
 
     return () => {
       console.log('[WebRTC] ProviderWebRTC unmounting, destroying peer...');
+      clearTimeout(offerTimer);
       if (peerRef.current) {
         peerRef.current.destroy();
       }

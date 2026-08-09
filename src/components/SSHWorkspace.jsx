@@ -127,10 +127,26 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
         });
         peerRef.current = peer;
 
-        peer.on('signal', answerData => {
+        let answerSent = false;
+
+        const sendAnswerData = (answerData) => {
+          if (answerSent) return;
+          answerSent = true;
           console.log('[WebRTC User] Answer generated, sending to provider...');
           window.c3.sendUserAnswer({ sessionId, answer: JSON.stringify(answerData) });
+        };
+
+        peer.on('signal', answerData => {
+          sendAnswerData(answerData);
         });
+
+        // Safeguard timeout: If candidate gathering takes > 3.5s, force answer with gathered candidates
+        setTimeout(() => {
+          if (!answerSent && peer._pc && peer._pc.localDescription) {
+            console.log('[WebRTC User] STUN gathering 3.5s timeout hit — forcing answer emission');
+            sendAnswerData(peer._pc.localDescription);
+          }
+        }, 3500);
 
         peer.on('connect', () => {
           console.log('[WebRTC User] Connected to provider!');
