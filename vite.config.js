@@ -6,11 +6,15 @@ export default defineConfig({
   plugins: [react()],
   root: 'src',
   base: './',
+  define: {
+    global: 'globalThis',
+    'process.env': {},
+  },
   build: {
     outDir: '../dist-ui',
     emptyOutDir: true,
   },
   resolve: {
-    alias: { '@': path.resolve(path.dirname(''), 'src') }
+    alias: { '@': path.resolve(__dirname, 'src') }
   }
 });

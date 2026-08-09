@@ -33,6 +33,21 @@ async function registerProvider(userId, profile) {
   return item;
 }
 
+async function getProvider(userId) {
+  const client = getClient();
+  const command = new GetItemCommand({
+    TableName: 'c3_providers',
+    Key: marshall({ userId })
+  });
+  try {
+    const response = await client.send(command);
+    return response.Item ? unmarshall(response.Item) : null;
+  } catch (e) {
+    console.error('[C3 Dynamo] getProvider error:', e.message);
+    return null;
+  }
+}
+
 async function updateProviderStatus(userId, status) {
   const client = getClient();
   const command = new UpdateItemCommand({
@@ -248,8 +263,26 @@ async function createUser(userId, email) {
   return item;
 }
 
+async function storeSignal(sessionId, field, data) {
+  const client = getClient();
+  const command = new UpdateItemCommand({
+    TableName: 'c3_sessions',
+    Key: marshall({ sessionId }),
+    UpdateExpression: 'SET #field = :val',
+    ExpressionAttributeNames: { '#field': field },
+    ExpressionAttributeValues: marshall({ ':val': data })
+  });
+  await client.send(command);
+}
+
+async function getSignal(sessionId, field) {
+  const session = await getSession(sessionId);
+  return session?.[field] || null;
+}
+
 module.exports = {
   registerProvider,
+  getProvider,
   updateProviderStatus,
   heartbeat,
   getActiveProviders,
@@ -261,5 +294,7 @@ module.exports = {
   getChatMessages,
   getUser,
   updateCredits,
-  createUser
+  createUser,
+  storeSignal,
+  getSignal
 };

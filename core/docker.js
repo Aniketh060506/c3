@@ -19,70 +19,10 @@ async function ensureImage(image) {
   }
 }
 
-/**
- * Wait until sshd inside the container is actually accepting connections.
- * Uses docker exec + bash /dev/tcp trick — no host port mapping needed.
- */
-async function waitForSshd(container, maxWaitMs = 180_000) {
-  const start = Date.now();
-  let attempt = 0;
-
-  console.log('[C3 Docker] Waiting for sshd inside container (apt-get may take 60-90s)...');
-
-  while (Date.now() - start < maxWaitMs) {
-    attempt++;
-    await new Promise(r => setTimeout(r, 3000));
-
-    // Make sure container is still alive
-    try {
-      const info = await container.inspect();
-      if (!info.State.Running) {
-        throw new Error(`Container exited prematurely (code ${info.State.ExitCode})`);
-      }
-    } catch (e) {
-      if (e.message.includes('exited')) throw e;
-    }
-
-    // Test TCP port 22 inside container via bash /dev/tcp
-    // IMPORTANT: Tty:true → raw output, no 8-byte binary Docker frame headers
-    const ready = await new Promise(async resolve => {
-      try {
-        const exec = await container.exec({
-          Cmd: ['/bin/bash', '-c',
-            'echo "" > /dev/tcp/localhost/22 2>/dev/null && echo SSHD_READY || echo SSHD_NOT_READY'],
-          AttachStdout: true,
-          AttachStderr: true,
-          Tty:          true,   // raw stream — no binary frame headers
-        });
-        const stream = await exec.start({ hijack: true, stdin: false });
-        let out = '';
-        stream.on('data', chunk => { out += chunk.toString(); });
-        stream.on('end', () => resolve(out.includes('SSHD_READY')));
-        stream.on('error', () => resolve(false));
-        setTimeout(() => resolve(false), 4000);
-      } catch { resolve(false); }
-    });
-
-    if (ready) {
-      const elapsed = Math.round((Date.now() - start) / 1000);
-      console.log(`[C3 Docker] ✅ sshd ready inside container after ${elapsed}s (${attempt} probes)`);
-      return;
-    }
-
-    const elapsed = Math.round((Date.now() - start) / 1000);
-    console.log(`[C3 Docker] ⏳ Probe #${attempt}: sshd not ready yet (${elapsed}s — apt-get still running)`);
-  }
-
-  throw new Error(`sshd not ready after ${maxWaitMs / 1000}s`);
-}
-
-async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, cudaRequested) {
-  // Use pre-built c3-base:latest image — openssh-server + openssh-client already installed.
-  // Container starts instantly (no apt-get delay). Entrypoint writes public key + starts sshd.
-  const image = 'c3-base:latest';
+async function startSession(sessionId, environment, cpuCores, ramGb, cudaRequested) {
+  const image = 'ubuntu:22.04';
   await ensureImage(image);
 
-  // Force-remove any existing container with same name
   try {
     const existing = docker.getContainer(`c3-${sessionId}`);
     await existing.stop({ t: 1 }).catch(() => {});
@@ -92,12 +32,10 @@ async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, 
   const containerConfig = {
     Image: image,
     name:  `c3-${sessionId}`,
-    // Public key injected via ENV — entrypoint writes it to authorized_keys
-    Env: [`C3_PUBKEY=${publicKey || ''}`],
-    // No host port binding — tunnel runs from inside the container via Serveo
+    Cmd: ['tail', '-f', '/dev/null'],
     HostConfig: {
-      CpuQuota:  cpuCores * 100_000,
-      CpuPeriod: 100_000,
+      CpuQuota:  cpuCores * 100000,
+      CpuPeriod: 100000,
       Memory:    ramGb * 1024 * 1024 * 1024,
     },
   };
@@ -108,12 +46,32 @@ async function startSession(sessionId, environment, cpuCores, ramGb, publicKey, 
 
   const container = await docker.createContainer(containerConfig);
   await container.start();
-  console.log(`[C3 Docker] Container c3-${sessionId} started (using c3-base:latest — instant!)`);
-
-  // Wait until sshd is up inside the container
-  await waitForSshd(container);
+  console.log(`[C3 Docker] Container c3-${sessionId} started (ubuntu:22.04)`);
 
   return { container };
+}
+
+async function execShell(sessionId) {
+  const container = docker.getContainer(`c3-${sessionId}`);
+  const exec = await container.exec({
+    Cmd: ['/bin/bash', '--login'],
+    Env: [
+      'TERM=xterm-256color',
+      'COLORTERM=truecolor',
+      'LANG=C.UTF-8',
+      'LC_ALL=C.UTF-8',
+      'COLUMNS=140',
+      'LINES=40',
+      'PS1=\\u@\\h:\\w\\$ ',
+      'PROMPT_COMMAND='
+    ],
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: true
+  });
+  const stream = await exec.start({ hijack: true, stdin: true });
+  return { stream, exec };
 }
 
 async function stopSession(sessionId) {
@@ -141,4 +99,8 @@ async function getContainerStats(sessionId) {
   }
 }
 
-module.exports = { isDockerRunning, startSession, stopSession, getContainerStats };
+function getContainerRef(name) {
+  return docker.getContainer(name);
+}
+
+module.exports = { isDockerRunning, startSession, stopSession, getContainerStats, execShell, getContainerRef };

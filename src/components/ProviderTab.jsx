@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ChatPanel from './ChatPanel';
+import ProviderWebRTC from './ProviderWebRTC';
 
 
 const STORAGE_KEY = 'c3_provider_profile';
@@ -31,6 +32,10 @@ function HardwareCard({ icon, label, value, sub, color = '#fff' }) {
 }
 
 export default function ProviderTab({ user, active, setActive }) {
+  const storageKey = user?.userId ? `c3_provider_${user.userId}` : 'c3_provider_profile';
+  const saved = () => { try { return JSON.parse(localStorage.getItem(storageKey) || 'null'); } catch { return null; } };
+  const persist = (data) => localStorage.setItem(storageKey, JSON.stringify(data));
+
   const cache = saved();
   const [specs, setSpecs]           = useState(cache?.specs || null);
   const [docker, setDocker]         = useState(false);
@@ -49,13 +54,28 @@ export default function ProviderTab({ user, active, setActive }) {
   const [acceptLogs, setAcceptLogs]   = useState([]);   // live step log
   const [acceptErr,  setAcceptErr]    = useState(null);
   const logsRef = useRef(null);
+  const [webrtcConnected, setWebrtcConnected] = useState(false);
 
+  // Check hardware & fetch remote provider profile from DynamoDB (source of truth)
   useEffect(() => {
     if (!window.c3) return;
     window.c3.isDockerRunning().then(r => setDocker(r)).catch(() => {});
-    if (!specs) window.c3.getHardwareSpecs().then(s => { setSpecs(s); persist({ ...cache, specs: s }); }).catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!specs) window.c3.getHardwareSpecs().then(s => { setSpecs(s); }).catch(() => {});
+
+    // Always sync with DynamoDB so user never has to register twice
+    if (window.c3.getProviderProfile) {
+      window.c3.getProviderProfile()
+        .then(p => {
+          if (p && p.displayName) {
+            setRegistered(true);
+            setProfile({ displayName: p.displayName, location: p.location || '' });
+            if (p.benchmarkScore) setScore(p.benchmarkScore);
+            persist({ registered: true, profile: { displayName: p.displayName, location: p.location || '' }, score: p.benchmarkScore || 0, specs });
+          }
+        })
+        .catch(() => {});
+    }
+  }, [user]);
 
   useEffect(() => {
     if (!active || !registered || !window.c3?.getPendingReqs) return;
@@ -158,6 +178,7 @@ export default function ProviderTab({ user, active, setActive }) {
   const endSession = () => {
     if (window.c3?.endSession && activeSession) window.c3.endSession(activeSession.sessionId).catch(() => {});
     setSession(null);
+    setAcceptLogs([]);
   };
 
   if (!window.c3) return (
@@ -324,6 +345,14 @@ export default function ProviderTab({ user, active, setActive }) {
                 <div>
                   <div style={{ fontWeight: 900, fontSize: 22, letterSpacing: '-0.5px' }}>Active Session Running</div>
                   <div style={{ fontSize: 14, color: '#71717a', marginTop: 4 }}>User is connected • {activeSession.environment || 'base'} environment</div>
+                  <div style={{ marginTop: 12 }}>
+                    <ProviderWebRTC
+                      sessionId={activeSession.sessionId}
+                      onConnected={() => setWebrtcConnected(true)}
+                      onError={(msg) => console.error('WebRTC:', msg)}
+                      onClose={() => { setSession(null); setAcceptLogs([]); }}
+                    />
+                  </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
                   <div style={{ fontFamily: 'monospace', fontSize: 28, fontWeight: 700, color: '#22c55e' }}>{fmt(elapsed)}</div>

@@ -4,15 +4,11 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 
-
 // ── Core modules ──────────────────────────────────────────────────────────────
 const cognito  = require('./core/cognito');
 const dynamo   = require('./core/dynamodb');
 const hardware = require('./core/hardware');
 const docker   = require('./core/docker');
-const containerTunnel = require('./core/container-tunnel');
-const ssh      = require('./core/ssh');
-const keypair  = require('./core/keypair');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let mainWindow       = null;
@@ -20,8 +16,8 @@ let heartbeatTimer   = null;
 let pendingPollTimer = null;
 let chatPollTimer    = null;
 let sessionPollMap   = new Map(); // sessionId → interval
-let privateKeyMap    = new Map(); // sessionId → privateKeyPem
 let activeUserId     = null;
+let activePtyStreams = new Map(); // sessionId -> stream
 
 // ── Window ────────────────────────────────────────────────────────────────────
 function createWindow() {
@@ -50,8 +46,12 @@ function createWindow() {
 
 const SESSION_FILE = path.join(app.getPath('userData'), 'c3_session.json');
 
-function saveSession(userId) {
-  try { fs.writeFileSync(SESSION_FILE, JSON.stringify({ userId }), 'utf8'); } catch (_) {}
+function saveSession(data) {
+  try {
+    const existing = loadSession() || {};
+    const updated = typeof data === 'string' ? { ...existing, userId: data } : { ...existing, ...data };
+    fs.writeFileSync(SESSION_FILE, JSON.stringify(updated), 'utf8');
+  } catch (_) {}
 }
 function loadSession() {
   try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch { return null; }
@@ -84,7 +84,6 @@ function getUserId() {
   return cognito.getUserId() || activeUserId || 'anonymous_user';
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUTH HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -92,10 +91,11 @@ function getUserId() {
 ipcMain.handle('auth:login', async (_, { email, pass }) => {
   const data = await cognito.login(email, pass);
   activeUserId = data.userId;
-  saveSession(data.userId); // persist so IPC works after restart
   try { await dynamo.createUser(data.userId, data.email); } catch (_e) {}
   const user = await dynamo.getUser(data.userId).catch(() => ({ userId: data.userId, email: data.email, credits: 100 }));
-  return { ...data, ...user };
+  const fullUser = { ...data, ...user };
+  saveSession(fullUser);
+  return fullUser;
 });
 
 ipcMain.handle('auth:signup', async (_, { email, pass }) => {
@@ -107,7 +107,7 @@ ipcMain.handle('auth:confirm', async (_, { email, code }) => {
 });
 
 ipcMain.handle('auth:signout', async () => {
-  await cognito.signOut();
+  await cognito.signOut().catch(() => {});
   activeUserId = null;
   try { fs.unlinkSync(SESSION_FILE); } catch (_) {}
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
@@ -116,13 +116,16 @@ ipcMain.handle('auth:signout', async () => {
 });
 
 ipcMain.handle('auth:getuser', async () => {
-  const userId = getUserId();
+  const saved = loadSession();
+  const userId = saved?.userId || getUserId();
   if (!userId || userId === 'anonymous_user') return null;
   try {
     const user = await dynamo.getUser(userId);
-    return { ...user, email: cognito.getEmail() };
+    const result = { ...saved, ...user, email: user?.email || saved?.email || cognito.getEmail() };
+    saveSession(result);
+    return result;
   } catch {
-    return { userId, email: cognito.getEmail(), credits: 100 };
+    return saved || { userId, email: cognito.getEmail(), credits: 100 };
   }
 });
 
@@ -148,6 +151,11 @@ ipcMain.handle('provider:register', async (_, profile) => {
   const userId = getUserId();
   await dynamo.registerProvider(userId, profile);
   return true;
+});
+
+ipcMain.handle('provider:get-profile', async () => {
+  const userId = getUserId();
+  return await dynamo.getProvider(userId);
 });
 
 ipcMain.handle('provider:toggle', async (_, active) => {
@@ -188,72 +196,217 @@ ipcMain.handle('provider:pending', async () => {
 });
 
 ipcMain.handle('provider:accept', async (_, { sessionId, data }) => {
-  debugLog('info',  '▶ Provider Accept started', `sessionId=${sessionId}`);
+  debugLog('info', '▶ Provider Accept started', `sessionId=${sessionId}`);
 
-  // ── Step 1: Docker running? ───────────────────────────────────────
-  debugLog('step', '⌛ Step 1/4: Checking Docker Desktop...');
+  // Step 1: Check Docker
+  debugLog('step', '⌛ Step 1/3: Checking Docker Desktop...');
   const dockerOk = await docker.isDockerRunning();
   if (!dockerOk) {
-    const e = 'Docker Desktop is not running. Please start Docker Desktop first.';
-    debugLog('error', '❌ Docker not running', e);
-    throw new Error(e);
+    debugLog('error', '❌ Docker not running');
+    throw new Error('Docker Desktop is not running.');
   }
   debugLog('ok', '✅ Docker Desktop is running');
 
-  // ── Step 2: Start container ──────────────────────────────────────
-  debugLog('step', `⌛ Step 2/4: Starting Docker container... (image: c3-base:latest)`);
-  debugLog('info', `  env=${data.environment || 'base'}  cpu=${data.cpuCores || 2}  ram=${data.ramGb || 4}GB  cuda=${data.cudaRequested || false}`);
+  // Step 2: Start container
+  debugLog('step', '⌛ Step 2/3: Starting Docker container...');
   try {
     await docker.startSession(
       sessionId,
-      data.environment   || 'base',
-      data.cpuCores      || 2,
-      data.ramGb         || 4,
-      data.publicKey     || '',
+      data.environment || 'base',
+      data.cpuCores || 2,
+      data.ramGb || 4,
       data.cudaRequested || false,
     );
-    debugLog('ok', '✅ Container started + sshd ready inside');
+    debugLog('ok', '✅ Container started');
   } catch (err) {
-    debugLog('error', '❌ Container/sshd start failed', err.message);
+    debugLog('error', '❌ Container start failed', err.message);
     throw err;
   }
 
-  // ── Step 3: Start in-container Serveo tunnel ──────────────────────
-  debugLog('step', '⌛ Step 3/4: Pre-flight internet check inside container...');
-  let host, port;
+  // Step 3: Create docker exec shell
+  debugLog('step', '⌛ Step 3/3: Creating shell session...');
   try {
-    // Monkey-patch console.log to also send to UI during tunnel phase
-    const origLog = console.log;
-    const origWarn = console.warn;
-    console.log  = (...a) => { origLog(...a);  debugLog('info',  a.join(' ')); };
-    console.warn = (...a) => { origWarn(...a); debugLog('warn',  a.join(' ')); };
-
-    ({ host, port } = await containerTunnel.startContainerTunnel(sessionId));
-
-    console.log  = origLog;
-    console.warn = origWarn;
-
-    debugLog('ok', `✅ Tunnel established → ${host}:${port}`);
-  } catch (tunnelErr) {
-    debugLog('error', '❌ Tunnel FAILED', tunnelErr.message);
-    await docker.stopSession(sessionId).catch(() => {});
-    throw new Error(`Container tunnel failed: ${tunnelErr.message}`);
+    const { stream: ptyStream, exec: ptyExec } = await docker.execShell(sessionId);
+    activePtyStreams.set(sessionId, { stream: ptyStream, exec: ptyExec });
+    
+    // Pipe docker exec stdout → renderer (provider side)
+    ptyStream.on('data', (chunk) => {
+      send('pty:data', chunk.toString());
+    });
+    ptyStream.on('end', () => {
+      debugLog('info', 'Docker exec shell ended');
+      activePtyStreams.delete(sessionId);
+    });
+    
+    debugLog('ok', '✅ Shell session created');
+  } catch (err) {
+    debugLog('error', '❌ Shell creation failed', err.message);
+    throw err;
   }
 
-  // ── Step 4: Write READY to DynamoDB ────────────────────────────
-  debugLog('step', '⌛ Step 4/4: Writing READY to DynamoDB...');
-  try {
-    await dynamo.updateSessionStatus(sessionId, 'READY', { sshHost: host, sshPort: port });
-    debugLog('ok', `✅ Session READY in DynamoDB → ${host}:${port}`);
-    debugLog('ok', '🎉 User can now connect!');
-  } catch (dbErr) {
-    debugLog('error', '❌ DynamoDB update failed', dbErr.message);
-    throw dbErr;
-  }
+  // Tell the provider renderer to start WebRTC as initiator
+  send('webrtc:start-provider', { sessionId });
+  debugLog('step', '⏳ Waiting for WebRTC offer from renderer...');
 
-  return { host, port };
+  // The actual DynamoDB update happens when we receive the offer from the renderer
+  return { sessionId };
 });
 
+// Provider renderer sends its SDP offer
+ipcMain.handle('webrtc:provider-offer', async (_, { sessionId, offer }) => {
+  debugLog('info', 'WebRTC offer received from renderer, storing in DynamoDB...');
+  await dynamo.storeSignal(sessionId, 'sdpOffer', offer);
+  await dynamo.updateSessionStatus(sessionId, 'READY');
+  debugLog('ok', '✅ Session READY — offer stored, waiting for user answer...');
+  
+  // Poll DynamoDB for the user's answer
+  const poll = setInterval(async () => {
+    try {
+      const answer = await dynamo.getSignal(sessionId, 'sdpAnswer');
+      if (answer) {
+        clearInterval(poll);
+        debugLog('ok', '✅ User answer received from DynamoDB!');
+        send('webrtc:answer-received', { sessionId, answer });
+      }
+    } catch (e) {
+      debugLog('warn', 'Poll error: ' + e.message);
+    }
+  }, 1500);
+  
+  // Store the poll so we can clean it up
+  sessionPollMap.set('signal-' + sessionId, poll);
+  return true;
+});
+
+// User renderer sends its SDP answer
+ipcMain.handle('webrtc:user-answer', async (_, { sessionId, answer }) => {
+  debugLog('info', 'Storing user WebRTC answer in DynamoDB...');
+  await dynamo.storeSignal(sessionId, 'sdpAnswer', answer);
+  debugLog('ok', '✅ User answer stored');
+  return true;
+});
+
+// User requests terminal connection
+ipcMain.handle('terminal:connect', async (_, sessionId) => {
+  debugLog('info', 'User requesting terminal connection', `sessionId=${sessionId}`);
+  const session = await dynamo.getSession(sessionId);
+  if (!session || session.status !== 'READY') {
+    throw new Error('Session not ready');
+  }
+  
+  const offer = session.sdpOffer;
+  if (!offer) throw new Error('No SDP offer found in session');
+  
+  debugLog('ok', 'SDP offer returned to user renderer');
+  return { offer };
+});
+
+ipcMain.handle('terminal:disconnect', async () => {
+  debugLog('info', 'Terminal disconnect requested');
+  return true;
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILE TRANSFER HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const { dialog } = require('electron');
+const { exec: execChild } = require('child_process');
+
+// User side: pick a local file to upload and return its content as base64
+ipcMain.handle('file:pick-upload', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select file to upload',
+    properties: ['openFile'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const filePath = result.filePaths[0];
+  const name = require('path').basename(filePath);
+  const content = fs.readFileSync(filePath);
+  return {
+    name,
+    size: content.length,
+    base64: content.toString('base64')
+  };
+});
+
+// User side: save received file content to local disk
+ipcMain.handle('file:save-download', async (_, { name, base64 }) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save file',
+    defaultPath: name,
+  });
+  if (result.canceled) return false;
+  fs.writeFileSync(result.filePath, Buffer.from(base64, 'base64'));
+  return true;
+});
+
+// Provider side: write received upload bytes into the running Docker container
+ipcMain.handle('container:write-file', async (_, { sessionId, destPath, base64 }) => {
+  const container = require('./core/docker').getContainerRef(`c3-${sessionId}`);
+  // Write via docker exec: echo base64 | base64 -d > destPath
+  const ptyEntry = activePtyStreams.get(sessionId);
+  const stream = ptyEntry?.stream || ptyEntry;
+  if (!stream) throw new Error('No active PTY stream for session');
+  // Use a separate exec (not the PTY) to write the file silently
+  const Docker = require('dockerode');
+  const d = new Docker();
+  const c = d.getContainer(`c3-${sessionId}`);
+  const exec = await c.exec({
+    Cmd: ['bash', '-c', `echo '${base64}' | base64 -d > '${destPath}'`],
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+  const s = await exec.start({});
+  await new Promise((resolve) => s.on('end', resolve));
+  return true;
+});
+
+// Provider side: read a file from the running Docker container and return base64
+ipcMain.handle('container:read-file', async (_, { sessionId, srcPath }) => {
+  const Docker = require('dockerode');
+  const d = new Docker();
+  const c = d.getContainer(`c3-${sessionId}`);
+  const name = require('path').basename(srcPath);
+  const exec = await c.exec({
+    Cmd: ['base64', srcPath],
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+  const s = await exec.start({});
+  const chunks = [];
+  s.on('data', chunk => chunks.push(chunk));
+  await new Promise(resolve => s.on('end', resolve));
+  const raw = Buffer.concat(chunks).toString();
+  // Docker exec output has an 8-byte header per frame — strip it
+  // Actually since Tty: false and AttachStdout: true the modem demuxes for us
+  // The output is the base64 content of the file
+  return { name, base64: raw.replace(/\s+/g, '') };
+});
+
+// Provider renderer forwards user input to docker exec stdin
+ipcMain.on('pty:input', (_, data) => {
+  for (const [sid, pty] of activePtyStreams) {
+    try {
+      const stream = pty.stream || pty;
+      stream.write(data);
+    } catch (e) {}
+  }
+});
+
+// Provider renderer forwards resize to docker exec
+ipcMain.on('pty:resize', (_, { cols, rows }) => {
+  const c = parseInt(cols, 10);
+  const r = parseInt(rows, 10);
+  if (isNaN(c) || isNaN(r)) return;
+  for (const [sid, pty] of activePtyStreams) {
+    try {
+      if (pty.exec && typeof pty.exec.resize === 'function') {
+        pty.exec.resize({ h: r, w: c });
+      }
+    } catch (e) {}
+  }
+});
 
 ipcMain.handle('provider:decline', async (_, sessionId) => {
   // Update DynamoDB first so the user-side poll sees DECLINED immediately
@@ -262,7 +415,14 @@ ipcMain.handle('provider:decline', async (_, sessionId) => {
 });
 
 ipcMain.handle('provider:end', async (_, sessionId) => {
-  try { tunnel.stopTunnel(); } catch (_) {}
+  // Clean up pty stream
+  const pty = activePtyStreams.get(sessionId);
+  const stream = pty?.stream || pty;
+  if (stream) { try { stream.end(); } catch(_){} activePtyStreams.delete(sessionId); }
+  // Clean up signal poll
+  const signalPoll = sessionPollMap.get('signal-' + sessionId);
+  if (signalPoll) { clearInterval(signalPoll); sessionPollMap.delete('signal-' + sessionId); }
+  // Stop container
   try { await docker.stopSession(sessionId); } catch (_) {}
   await dynamo.updateSessionStatus(sessionId, 'COMPLETED').catch(() => {});
   return true;
@@ -285,23 +445,21 @@ ipcMain.handle('market:providers', async () => {
 
 ipcMain.handle('market:request', async (_, payload) => {
   const userId = getUserId();
-  const { privateKeyPem, publicKeyOpenSSH } = keypair.generateKeyPair();
   const sessionId = require('uuid').v4();
-  privateKeyMap.set(sessionId, privateKeyPem);
 
   await dynamo.createSessionRequest({
     sessionId,
-    providerId:     payload.providerId,
+    providerId: payload.providerId,
     userId,
-    environment:    payload.environment   || 'base',
-    cpuCores:       payload.cpuCores      || 2,
-    ramGb:          payload.ramGb         || 4,
-    durationHours:  payload.durationHours || 1,
-    cudaRequested:  payload.cudaRequested || false,
-    publicKey:      publicKeyOpenSSH,
-    status:         'PENDING',
+    environment: payload.environment || 'base',
+    cpuCores: payload.cpuCores || 2,
+    ramGb: payload.ramGb || 4,
+    durationHours: payload.durationHours || 1,
+    cudaRequested: payload.cudaRequested || false,
+    status: 'PENDING',
   });
 
+  // Poll for session status (READY/DECLINED)
   const poll = setInterval(async () => {
     try {
       const session = await dynamo.getSession(sessionId);
@@ -315,14 +473,14 @@ ipcMain.handle('market:request', async (_, payload) => {
         send('session:ready', { sessionId, status: session.status });
       }
     } catch (_) {}
-  }, 2_000);
+  }, 2000);
 
   sessionPollMap.set(sessionId, poll);
   return { sessionId };
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CREDITS & CHAT & SSH & SFTP HANDLERS
+// CREDITS & CHAT HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 ipcMain.handle('credits:get', async () => {
@@ -362,59 +520,3 @@ ipcMain.handle('chat:stoppoll', () => {
   if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; }
   return true;
 });
-
-ipcMain.handle('ssh:connect', async (_, sessionId) => {
-  const session       = await dynamo.getSession(sessionId);
-  const privateKeyPem = privateKeyMap.get(sessionId);
-
-  if (!privateKeyPem) throw new Error('Session keypair not found — please reconnect.');
-  if (!session.sshHost || !session.sshPort) throw new Error('Session not ready — no SSH endpoint.');
-
-  const { sshHost, sshPort } = session;
-  console.log(`[C3] Connecting SSH → ${sshHost}:${sshPort}`);
-
-  // ── Real TCP probe ────────────────────────────────────────────────────────
-  // Test if we can actually reach the port before wasting 20s on SSH timeout
-  send('ssh:progress', { step: 'tcp', host: sshHost, port: sshPort });
-  const tcpOk = await new Promise(resolve => {
-    const s = require('net').connect(parseInt(sshPort), sshHost);
-    s.setTimeout(5000);
-    s.on('connect', () => { s.destroy(); resolve(true); });
-    s.on('timeout', () => { s.destroy(); resolve(false); });
-    s.on('error',   () => resolve(false));
-  });
-  if (!tcpOk) throw new Error(
-    `Cannot reach ${sshHost}:${sshPort} (TCP timeout). ` +
-    'Make sure both devices are on the same Wi-Fi network and Windows Firewall is not blocking the port.'
-  );
-
-  // ── SSH handshake ─────────────────────────────────────────────────────────
-  send('ssh:progress', { step: 'handshake' });
-  await ssh.connect(
-    sshHost,
-    parseInt(sshPort),
-    privateKeyPem,
-    (data) => send('ssh:data',  data),
-    ()     => send('ssh:close', null),
-    (step) => send('ssh:progress', { step }), // auth / shell progress
-  );
-
-  // SFTP is optional — open in background so the terminal isn't blocked
-  ssh.openSftp().catch(e => console.warn('[C3] SFTP init failed (non-fatal):', e.message));
-  ssh.startTelemetry((m) => send('ssh:telemetry', m));
-  return true;
-});
-
-
-ipcMain.handle('ssh:disconnect', async () => {
-  ssh.stopTelemetry();
-  ssh.disconnect();
-  return true;
-});
-
-ipcMain.on('ssh:input',  (_, data)           => ssh.sendInput(data));
-ipcMain.on('ssh:resize', (_, { cols, rows }) => ssh.resizeTerminal(cols, rows));
-
-ipcMain.handle('sftp:list',     async (_, remotePath)          => ssh.listFiles(remotePath));
-ipcMain.handle('sftp:upload',   async (_, { local, remote })   => ssh.uploadFile(local, remote));
-ipcMain.handle('sftp:download', async (_, { remote, local })   => ssh.downloadFile(remote, local));

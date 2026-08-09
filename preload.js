@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('c3', {
   // ── Provider ─────────────────────────────────────────────────────────────────
   isDockerRunning:  ()                => ipcRenderer.invoke('docker:ping'),
   registerProvider: (profile)         => ipcRenderer.invoke('provider:register',  profile),
+  getProviderProfile: ()              => ipcRenderer.invoke('provider:get-profile'),
   toggleStatus:     (active)          => ipcRenderer.invoke('provider:toggle',    active),
   getPendingReqs:   ()                => ipcRenderer.invoke('provider:pending'),
   acceptRequest:    (sessionId, data) => ipcRenderer.invoke('provider:accept',    { sessionId, data }),
@@ -35,22 +36,28 @@ contextBridge.exposeInMainWorld('c3', {
   startChatPoll:    (chatId)          => ipcRenderer.invoke('chat:startpoll', chatId),
   stopChatPoll:     ()                => ipcRenderer.invoke('chat:stoppoll'),
 
-  // ── SSH Terminal ──────────────────────────────────────────────────────────────
-  connectSSH:       (sessionId)       => ipcRenderer.invoke('ssh:connect',  sessionId),
-  disconnectSSH:    ()                => ipcRenderer.invoke('ssh:disconnect'),
-  sendTermInput:    (data)            => ipcRenderer.send('ssh:input',      data),
-  resizeTerminal:   (cols, rows)      => ipcRenderer.send('ssh:resize',     { cols, rows }),
+  // ── WebRTC Signaling (Provider Side) ──────────────────────────────────────────
+  onStartProvider:    (cb) => { ipcRenderer.on('webrtc:start-provider', (_, d) => cb(d)); },
+  sendProviderOffer:  (data) => ipcRenderer.invoke('webrtc:provider-offer', data),
+  onAnswerReceived:   (cb) => { ipcRenderer.on('webrtc:answer-received', (_, d) => cb(d)); },
+  onPtyData:          (cb) => { ipcRenderer.on('pty:data', (_, d) => cb(d)); },
+  sendPtyInput:       (data) => ipcRenderer.send('pty:input', data),
+  sendPtyResize:      (data) => ipcRenderer.send('pty:resize', data),
 
-  // ── SFTP ──────────────────────────────────────────────────────────────────────
-  listFiles:        (remotePath)      => ipcRenderer.invoke('sftp:list',     remotePath),
-  uploadFile:       (local, remote)   => ipcRenderer.invoke('sftp:upload',   { local, remote }),
-  downloadFile:     (remote, local)   => ipcRenderer.invoke('sftp:download', { remote, local }),
+  // ── WebRTC Signaling (User Side) ──────────────────────────────────────────────
+  connectTerminal:    (sessionId) => ipcRenderer.invoke('terminal:connect', sessionId),
+  disconnectTerminal: () => ipcRenderer.invoke('terminal:disconnect'),
+  onWebRTCOffer:      (cb) => { ipcRenderer.on('webrtc:offer', (_, d) => cb(d)); },
+  sendUserAnswer:     (data) => ipcRenderer.invoke('webrtc:user-answer', data),
+
+  // ── File Transfer ─────────────────────────────────────────────────────────────
+  pickFileForUpload:   ()                       => ipcRenderer.invoke('file:pick-upload'),
+  saveDownloadedFile:  (data)                   => ipcRenderer.invoke('file:save-download', data),
+  containerWriteFile:  (data)                   => ipcRenderer.invoke('container:write-file', data),
+  containerReadFile:   (data)                   => ipcRenderer.invoke('container:read-file', data),
+
 
   // ── Push events (backend → renderer) ─────────────────────────────────────────
-  onTerminalData:   (cb) => { ipcRenderer.on('ssh:data',          (_, d) => cb(d)); },
-  onTerminalClose:  (cb) => { ipcRenderer.on('ssh:close',         (_, d) => cb(d)); },
-  onTelemetry:      (cb) => { ipcRenderer.on('ssh:telemetry',     (_, d) => cb(d)); },
-  onSSHProgress:    (cb) => { ipcRenderer.on('ssh:progress',      (_, d) => cb(d)); },
   onChatMessages:   (cb) => { ipcRenderer.on('chat:messages',     (_, d) => cb(d)); },
   onSessionReady:   (cb) => { ipcRenderer.on('session:ready',     (_, d) => cb(d)); },
   onNewRequest:     (cb) => { ipcRenderer.on('provider:newreq',   (_, d) => cb(d)); },

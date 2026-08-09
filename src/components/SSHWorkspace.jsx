@@ -1,70 +1,177 @@
 import React, { useState, useEffect, useRef } from 'react';
+import SimplePeer from 'simple-peer';
+import 'xterm/css/xterm.css';
 
 export default function SSHWorkspace({ sessionId, provider, onEnd }) {
-  const [files, setFiles] = useState([]);
-  const [currentPath, setCurrentPath] = useState('/workspace');
   const [telemetry, setTelemetry] = useState({ cpu: 0, ram: 0 });
   const [elapsed, setElapsed] = useState('00:00:00');
+  const [status, setStatus] = useState('Connecting via WebRTC...');
+  const [errorMsg, setErrorMsg] = useState(null);
+  
+  // New state variables for File Manager
+  const [remotePath, setRemotePath] = useState('/workspace/');
+  const [transferLog, setTransferLog] = useState([]);
+  const [downloadBuffers, setDownloadBuffers] = useState({});
+  const [uploading, setUploading] = useState(false);
+
   const termRef = useRef(null);
   const startTime = useRef(Date.now());
+  const peerRef = useRef(null);
   const xtermObj = useRef(null);
-  const fitAddonObj = useRef(null);
+
+  const handleUpload = async () => {
+    if (!peerRef.current?.connected) return;
+    if (!window.c3?.pickFileForUpload) return;
+    setUploading(true);
+    const file = await window.c3.pickFileForUpload();
+    if (!file) { setUploading(false); return; }
+    setTransferLog(prev => [{ dir: 'up', name: file.name, size: file.size, status: 'Uploading...' }, ...prev.slice(0, 9)]);
+    const CHUNK = 32768;
+    peerRef.current.send(JSON.stringify({ t: 'upload_start', name: file.name, size: file.size, destPath: '/workspace/' + file.name }));
+    const b64 = file.base64;
+    for (let i = 0; i < b64.length; i += CHUNK) {
+      peerRef.current.send(JSON.stringify({ t: 'upload_chunk', name: file.name, chunk: b64.slice(i, i + CHUNK), seq: Math.floor(i / CHUNK) }));
+    }
+    peerRef.current.send(JSON.stringify({ t: 'upload_end', name: file.name }));
+    setTransferLog(prev => prev.map(t => t.name === file.name ? { ...t, status: 'Done ✓' } : t));
+    setUploading(false);
+  };
+
+  const handleDownload = () => {
+    if (!peerRef.current?.connected || !remotePath.trim()) return;
+    peerRef.current.send(JSON.stringify({ t: 'download_req', path: remotePath.trim() }));
+  };
 
   useEffect(() => {
-    // Dynamic import for xterm to avoid SSR issues if any, but since this is Vite/Electron it should be fine.
-    // For this context we assume standard import works, but if not installed it'll throw. 
-    // We will use standard dynamic import just in case.
     let term, fit;
-    const initTerm = async () => {
+    let resizeObserver;
+    
+    const initWorkspace = async () => {
       try {
         const { Terminal } = await import('xterm');
         const { FitAddon } = await import('@xterm/addon-fit');
-        // import 'xterm/css/xterm.css'; // Usually needed but we style container
         
         term = new Terminal({
-          theme: { background:'#000000', foreground:'#e4e4e7', cursor:'#fafafa', cursorAccent:'#000' },
-          fontFamily: "'JetBrains Mono', monospace",
+          theme: { background: '#09090d', foreground: '#f8fafc', cursor: '#22c55e', selectionBackground: 'rgba(255,255,255,0.2)' },
+          fontFamily: "'JetBrains Mono', 'Consolas', 'Courier New', monospace",
           fontSize: 13,
-          lineHeight: 1.4,
+          lineHeight: 1.35,
+          cursorBlink: true,
+          convertEol: true,
+          scrollback: 5000,
         });
         fit = new FitAddon();
         term.loadAddon(fit);
         term.open(termRef.current);
         fit.fit();
-        
         xtermObj.current = term;
-        fitAddonObj.current = fit;
-
+        
         term.onData(d => {
-          if (window.c3?.sendTerminalInput) window.c3.sendTerminalInput(d);
+          if (peerRef.current && peerRef.current.connected) {
+            peerRef.current.send(JSON.stringify({ t: 'd', d }));
+          }
         });
 
-        const resizeObserver = new ResizeObserver(() => {
+        resizeObserver = new ResizeObserver(() => {
           fit.fit();
-          if (window.c3?.resizeTerminal) {
-            window.c3.resizeTerminal(term.cols, term.rows);
+          if (peerRef.current && peerRef.current.connected) {
+            peerRef.current.send(JSON.stringify({ t: 'r', c: term.cols, r: term.rows }));
           }
         });
         resizeObserver.observe(termRef.current);
-        
-        if (window.c3) {
-          if (window.c3.connectSSH) window.c3.connectSSH(sessionId);
-          window.c3.onTerminalData?.(data => term.write(data));
-          window.c3.onTelemetryUpdate?.(m => setTelemetry(m));
-          window.c3.onTerminalClosed?.(() => onEnd());
-          
-          if (window.c3.listFiles) {
-            window.c3.listFiles(currentPath).then(res => setFiles(res || []));
-          }
-        } else {
-          term.write('C3 Desktop environment required. Connection simulating...\r\n$ ');
+
+        if (!window.c3) {
+          term.write('C3 Desktop environment required.\r\n$ ');
+          return;
         }
+
+        setStatus('Fetching SDP offer from provider...');
+        const res = await window.c3.connectTerminal(sessionId);
+        if (!res || !res.offer) {
+          throw new Error('Provider offer not found');
+        }
+
+        setStatus('Connecting P2P channel...');
+
+        const peer = new SimplePeer({
+          initiator: false,
+          trickle: false,
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+            ]
+          }
+        });
+        peerRef.current = peer;
+
+        peer.on('signal', answerData => {
+          console.log('[WebRTC User] Answer generated, sending to provider...');
+          window.c3.sendUserAnswer({ sessionId, answer: JSON.stringify(answerData) });
+        });
+
+        peer.on('connect', () => {
+          console.log('[WebRTC User] Connected to provider!');
+          setStatus('Connected via WebRTC (P2P encrypted)');
+          term.write('\r\n\x1b[32m[C3] P2P WebRTC connection established!\x1b[0m\r\n\r\n');
+          peer.send(JSON.stringify({ t: 'r', c: term.cols, r: term.rows }));
+        });
+
+        peer.on('data', rawData => {
+          try {
+            const msg = JSON.parse(rawData);
+            if (msg.t === 'd' && msg.d) {
+              term.write(msg.d);
+            }
+            if (msg.t === 'download_start') {
+              setDownloadBuffers(prev => ({ ...prev, [msg.name]: { chunks: [], name: msg.name } }));
+              setTransferLog(prev => [{ dir: 'down', name: msg.name, status: 'Downloading...' }, ...prev.slice(0, 9)]);
+            }
+            if (msg.t === 'download_chunk') {
+              setDownloadBuffers(prev => {
+                const existing = prev[msg.name] || { chunks: [], name: msg.name };
+                return { ...prev, [msg.name]: { ...existing, chunks: [...existing.chunks, msg.chunk] } };
+              });
+            }
+            if (msg.t === 'download_end') {
+              setDownloadBuffers(prev => {
+                const buf = prev[msg.name];
+                if (buf) {
+                  const fullBase64 = buf.chunks.join('');
+                  window.c3?.saveDownloadedFile({ name: msg.name, base64: fullBase64 });
+                  setTransferLog(tl => tl.map(t => t.name === msg.name ? { ...t, status: 'Done ✓' } : t));
+                }
+                const next = { ...prev };
+                delete next[msg.name];
+                return next;
+              });
+            }
+          } catch (e) {
+            console.error("Invalid WebRTC chunk:", e);
+          }
+        });
+
+        peer.on('close', () => {
+          setStatus('Disconnected');
+          term.write('\r\n\x1b[31m[C3] Session closed.\x1b[0m\r\n');
+        });
+
+        peer.on('error', err => {
+          console.error('[WebRTC User] Peer error:', err);
+          setStatus('Error: ' + err.message);
+          setErrorMsg(err.message);
+        });
+
+        peer.signal(JSON.parse(res.offer));
+
       } catch (e) {
-        console.error("Failed to load xterm", e);
+        console.error("Failed to connect WebRTC terminal:", e);
+        setStatus('Connection failed');
+        setErrorMsg(e.message);
       }
     };
     
-    initTerm();
+    initWorkspace();
 
     const timer = setInterval(() => {
       const diff = Math.floor((Date.now() - startTime.current) / 1000);
@@ -76,106 +183,124 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
 
     return () => {
       clearInterval(timer);
+      if (peerRef.current) peerRef.current.destroy();
       if (term) term.dispose();
+      if (resizeObserver) resizeObserver.disconnect();
     };
-  }, [sessionId, currentPath, onEnd]);
-
-  useEffect(() => {
-    if (window.c3?.listFiles) {
-      window.c3.listFiles(currentPath).then(res => setFiles(res || []));
-    }
-  }, [currentPath]);
-
-  const handleDownload = (fileName) => {
-    if (window.c3?.downloadFile) {
-      window.c3.downloadFile(`${currentPath}/${fileName}`, fileName);
-    }
-  };
+  }, [sessionId]);
 
   return (
-    <div className="full fcol">
-      <div className="flex ac jsb" style={{ height: '58px', padding: '0 20px', borderBottom: '1px solid var(--br)', background: 'var(--card)' }}>
-        <div className="flex ac g3">
-          <div className="dot dot-g"></div>
-          <div style={{ fontWeight: 600 }}>Connected to {provider?.displayName || 'Node'}</div>
-          <div className="badge badge-w">⏱ {elapsed}</div>
-        </div>
-        
-        <div className="flex ac g4" style={{ flex: 1, maxWidth: '400px' }}>
-          <div className="f1 flex ac g2">
-            <span className="font-sm text-color-tertiary">CPU</span>
-            <div className="ptrack f1"><div className="pfill green" style={{ width: `${telemetry.cpu}%` }}></div></div>
-            <span className="font-sm font-weight-bold">{telemetry.cpu}%</span>
-          </div>
-          <div className="f1 flex ac g2">
-            <span className="font-sm text-color-tertiary">RAM</span>
-            <div className="ptrack f1"><div className="pfill amber" style={{ width: `${(telemetry.ram / (provider?.totalRamGB || 16))*100}%` }}></div></div>
-            <span className="font-sm font-weight-bold">{telemetry.ram}GB</span>
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: '#09090c', padding: 24, boxSizing: 'border-box' }}>
+      
+      {/* Top Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, background: '#111119', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 16, padding: '14px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: status.includes('Connected') ? '#22c55e' : '#f59e0b', boxShadow: status.includes('Connected') ? '0 0 10px rgba(34,197,94,0.6)' : 'none' }} />
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14, color: '#f8fafc' }}>
+              {provider?.displayName || 'Remote Node'} • <span style={{ color: status.includes('Connected') ? '#34d399' : '#f59e0b' }}>{status}</span>
+            </div>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+              Session ID: {sessionId} • Duration: {elapsed}
+            </div>
           </div>
         </div>
-        
-        <div className="flex g2">
-          <button className="btn btn-ghost btn-sm">Upload</button>
-          <button className="btn btn-danger btn-sm" onClick={onEnd}>End Session</button>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button onClick={() => {
+            if (window.c3?.endSession) window.c3.endSession(sessionId).catch(() => {});
+            onEnd();
+          }} className="btn btn-danger btn-sm" style={{ padding: '8px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700 }}>
+            ✕ End Session
+          </button>
         </div>
       </div>
 
-      <div className="f1 flex frow" style={{ overflow: 'hidden' }}>
-        <div className="f1" style={{ flexBasis: '60%', padding: '16px', display: 'flex' }}>
-          <div className="term-shell f1">
-            <div className="term-bar">
-              <div className="flex ac g2">
-                <div className="mac-dot r"></div>
-                <div className="mac-dot y"></div>
-                <div className="mac-dot g"></div>
-              </div>
-              <div className="font-sm text-color-tertiary" style={{ fontFamily: 'monospace' }}>ubuntu@node:~</div>
-            </div>
-            <div ref={termRef} className="f1" style={{ padding: '10px' }}></div>
-          </div>
-        </div>
+      {/* Main Terminal Split View */}
+      <div style={{ flex: 1, display: 'flex', gap: 16, overflow: 'hidden' }}>
         
-        <div style={{ flexBasis: '40%', borderLeft: '1px solid var(--br)', display: 'flex', flexDirection: 'column', background: 'var(--card2)' }}>
-          <div className="flex ac g2" style={{ padding: '12px 16px', borderBottom: '1px solid var(--br)' }}>
-            <div className="font-sm text-color-tertiary">Path:</div>
-            <div className="font-sm font-weight-medium" style={{ fontFamily: 'monospace' }}>{currentPath}</div>
+        {/* Terminal Box (70%) */}
+        <div className="terminal-shell" style={{ width: '70%', display: 'flex', flexDirection: 'column', background: '#000', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 16, overflow: 'hidden' }}>
+          <div className="terminal-titlebar" style={{ padding: '10px 16px', background: '#0a0a0f', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <div className="mac-dot red" style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} />
+              <div className="mac-dot yellow" style={{ width: 10, height: 10, borderRadius: '50%', background: '#f59e0b' }} />
+              <div className="mac-dot green" style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e' }} />
+            </div>
+            <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', marginLeft: 8 }}>bash — ubuntu@c3-container</span>
+          </div>
+
+          <div style={{ flex: 1, padding: 12, overflow: 'hidden' }} ref={termRef} />
+        </div>
+
+        {/* File Manager Box (30%) */}
+        <div style={{ width: '30%', display: 'flex', flexDirection: 'column', background: '#0e0e12', borderLeft: '1px solid rgba(255,255,255,0.07)', borderRadius: 16, padding: 16, boxSizing: 'border-box' }}>
+          <div style={{ fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#52525b', marginBottom: 16 }}>
+            📁 File Transfer
           </div>
           
-          <div className="f1 scroll" style={{ padding: '12px' }}>
-            {!window.c3 && (
-              <div className="text-center font-sm text-color-tertiary" style={{ margin: '20px' }}>
-                File manager unavailable in browser mock mode.
-              </div>
-            )}
-            
-            {currentPath !== '/' && currentPath !== '/workspace' && window.c3 && (
-              <div className="file-row" onClick={() => {
-                const parts = currentPath.split('/');
-                parts.pop();
-                setCurrentPath(parts.join('/') || '/');
-              }}>
-                📁 <span style={{ marginLeft: '6px' }}>..</span>
-              </div>
-            )}
-            
-            {files.map((f, i) => (
-              <div key={i} className="file-row jsb" onClick={() => f.isDirectory && setCurrentPath(`${currentPath}/${f.name}`.replace('//', '/'))}>
-                <div className="flex ac">
-                  {f.isDirectory ? '📁' : '📄'} 
-                  <span style={{ marginLeft: '10px' }}>{f.name}</span>
-                </div>
-                {!f.isDirectory && (
-                  <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); handleDownload(f.name); }}>↓</button>
-                )}
-              </div>
-            ))}
-
-            <div className="drop-zone" style={{ marginTop: '20px' }}>
-              Drag & Drop files here to upload to {currentPath}
+          {!status.includes('Connected') ? (
+            <div style={{ color: '#64748b', fontSize: 12, textAlign: 'center', marginTop: 32 }}>
+              Connect to a session first
             </div>
-          </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, flex: 1, overflow: 'hidden' }}>
+              {/* Upload Section */}
+              <div>
+                <button 
+                  onClick={handleUpload}
+                  disabled={uploading}
+                  style={{ width: '100%', background: '#fff', color: '#000', border: 'none', borderRadius: 8, padding: '10px 16px', fontWeight: 'bold', cursor: uploading ? 'not-allowed' : 'pointer' }}
+                >
+                  {uploading ? 'Uploading...' : '↑ Upload File'}
+                </button>
+              </div>
+
+              {/* Download Section */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  type="text"
+                  value={remotePath}
+                  onChange={(e) => setRemotePath(e.target.value)}
+                  placeholder="/workspace/filename"
+                  style={{ background: '#222228', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 8, padding: '8px 12px', fontSize: 12, outline: 'none' }}
+                />
+                <button 
+                  onClick={handleDownload}
+                  style={{ width: '100%', background: 'rgba(255,255,255,0.08)', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 16px', fontWeight: 'bold', cursor: 'pointer' }}
+                >
+                  ↓ Download
+                </button>
+              </div>
+
+              {/* Transfer Log */}
+              <div style={{ flex: 1, marginTop: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', color: '#52525b', marginBottom: 8 }}>
+                  Recent Transfers
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {transferLog.length === 0 ? (
+                    <div style={{ fontSize: 11, color: '#52525b' }}>No recent transfers</div>
+                  ) : (
+                    transferLog.map((log, idx) => (
+                      <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, fontFamily: 'monospace' }}>
+                        <div style={{ color: '#f8fafc', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70%' }} title={log.name}>
+                          {log.dir === 'up' ? '⬆️' : '⬇️'} {log.name} {log.size ? `(${Math.round(log.size / 1024)}KB)` : ''}
+                        </div>
+                        <div style={{ color: log.status.includes('Done') ? '#22c55e' : '#f59e0b', whiteSpace: 'nowrap' }}>
+                          {log.status}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
+
       </div>
+
     </div>
   );
 }
