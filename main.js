@@ -493,24 +493,43 @@ ipcMain.handle('market:request', async (_, payload) => {
     status: 'PENDING',
   });
 
-  // Poll for session status (READY/DECLINED)
+  // Poll for session status (READY/DECLINED) - with logging so errors are visible
+  debugLog('info', `Polling DynamoDB for session ${sessionId} status...`);
   const poll = setInterval(async () => {
     try {
       const session = await dynamo.getSession(sessionId);
+      if (!session) {
+        debugLog('warn', `Session ${sessionId} not found in DynamoDB yet`);
+        return;
+      }
+      debugLog('info', `Session ${sessionId} status: ${session.status}`);
       if (session.status === 'READY') {
         clearInterval(poll);
         sessionPollMap.delete(sessionId);
+        debugLog('ok', `✅ Session READY — notifying renderer`);
         send('session:ready', { sessionId, ...session });
       } else if (session.status === 'DECLINED' || session.status === 'COMPLETED') {
         clearInterval(poll);
         sessionPollMap.delete(sessionId);
         send('session:ready', { sessionId, status: session.status });
       }
-    } catch (_) {}
+    } catch (e) {
+      debugLog('warn', `Session poll error: ${e.message}`);
+    }
   }, 1000);
 
   sessionPollMap.set(sessionId, poll);
   return { sessionId };
+});
+
+// Allow renderer to directly check session status (fallback for cross-device polling)
+ipcMain.handle('session:get', async (_, sessionId) => {
+  try {
+    return await dynamo.getSession(sessionId);
+  } catch (e) {
+    console.error('[C3] session:get error:', e.message);
+    return null;
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

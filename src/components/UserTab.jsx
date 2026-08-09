@@ -53,6 +53,8 @@ export default function UserTab({ user }) {
 
     if (window.c3?.onSessionReady) {
       window.c3.onSessionReady((session) => {
+        // Clear the renderer-side backup poll if it was running
+        if (window._c3BackupPoll) { clearInterval(window._c3BackupPoll); window._c3BackupPoll = null; }
         setWaiting(false);
         // DECLINED or COMPLETED → show declined notice, NOT the terminal
         if (session.status === 'DECLINED' || session.status === 'COMPLETED') {
@@ -80,7 +82,7 @@ export default function UserTab({ user }) {
       setSelectedNode(null);
       setWaiting(true);
       setDeclined(false);
-      await window.c3.sendSessionReq({
+      const { sessionId } = await window.c3.sendSessionReq({
         providerId:    node.userId,
         environment:   config.environment,
         cpuCores:      config.cpuCores,
@@ -88,6 +90,31 @@ export default function UserTab({ user }) {
         durationHours: config.durationHours,
         cudaRequested: config.cudaRequested,
       });
+
+      // Renderer-side backup poll — in case the IPC session:ready event is missed
+      // (can happen on slow connections or race conditions)
+      if (sessionId && window.c3?.getSession) {
+        const backupPoll = setInterval(async () => {
+          try {
+            const session = await window.c3.getSession(sessionId);
+            if (!session) return;
+            if (session.status === 'READY' || session.status === 'DECLINED' || session.status === 'COMPLETED') {
+              clearInterval(backupPoll);
+              if (session.status === 'READY') {
+                setWaiting(false);
+                setActiveSession({ ...session, sessionId });
+                setDeclined(false);
+              } else {
+                setWaiting(false);
+                setDeclined(true);
+                setActiveSession(null);
+              }
+            }
+          } catch (_) {}
+        }, 1500);
+        // Store so we can clear it if session:ready fires first
+        window._c3BackupPoll = backupPoll;
+      }
     } catch (e) { setWaiting(false); alert(e.message); }
   };
 

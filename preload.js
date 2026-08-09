@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('c3', {
   // ── Marketplace ───────────────────────────────────────────────────────────────
   getProviders:     ()                => ipcRenderer.invoke('market:providers'),
   sendSessionReq:   (payload)         => ipcRenderer.invoke('market:request',     payload),
+  getSession:       (sessionId)       => ipcRenderer.invoke('session:get',         sessionId),
 
   // ── Credits ───────────────────────────────────────────────────────────────────
   getCredits:       ()                => ipcRenderer.invoke('credits:get'),
