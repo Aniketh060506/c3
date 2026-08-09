@@ -12,6 +12,7 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
   const [remotePath, setRemotePath] = useState('/workspace/');
   const [transferLog, setTransferLog] = useState([]);
   const [downloadBuffers, setDownloadBuffers] = useState({});
+  const [uploadDir, setUploadDir] = useState('/workspace/');
   const [uploading, setUploading] = useState(false);
 
   const termRef = useRef(null);
@@ -27,7 +28,9 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
     if (!file) { setUploading(false); return; }
     setTransferLog(prev => [{ dir: 'up', name: file.name, size: file.size, status: 'Uploading...' }, ...prev.slice(0, 9)]);
     const CHUNK = 32768;
-    peerRef.current.send(JSON.stringify({ t: 'upload_start', name: file.name, size: file.size, destPath: '/workspace/' + file.name }));
+    const dir = uploadDir.trim() || '/workspace/';
+    const destPath = dir.endsWith('/') ? dir + file.name : dir + '/' + file.name;
+    peerRef.current.send(JSON.stringify({ t: 'upload_start', name: file.name, size: file.size, destPath }));
     const b64 = file.base64;
     for (let i = 0; i < b64.length; i += CHUNK) {
       peerRef.current.send(JSON.stringify({ t: 'upload_chunk', name: file.name, chunk: b64.slice(i, i + CHUNK), seq: Math.floor(i / CHUNK) }));
@@ -100,6 +103,8 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
             iceServers: [
               { urls: 'stun:stun.l.google.com:19302' },
               { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' },
+              { urls: 'stun:global.stun.twilio.com:3478' }
             ]
           }
         });
@@ -246,30 +251,39 @@ export default function SSHWorkspace({ sessionId, provider, onEnd }) {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16, flex: 1, overflow: 'hidden' }}>
               {/* Upload Section */}
-              <div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontSize: 11, color: '#a1a1aa', fontWeight: 600 }}>Upload Target Directory</div>
+                <input
+                  type="text"
+                  value={uploadDir}
+                  onChange={(e) => setUploadDir(e.target.value)}
+                  placeholder="/workspace/"
+                  style={{ background: '#222228', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 8, padding: '8px 12px', fontSize: 12, outline: 'none' }}
+                />
                 <button 
                   onClick={handleUpload}
                   disabled={uploading}
                   style={{ width: '100%', background: '#fff', color: '#000', border: 'none', borderRadius: 8, padding: '10px 16px', fontWeight: 'bold', cursor: uploading ? 'not-allowed' : 'pointer' }}
                 >
-                  {uploading ? 'Uploading...' : '↑ Upload File'}
+                  {uploading ? 'Uploading...' : '↑ Upload Local File'}
                 </button>
               </div>
 
               {/* Download Section */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontSize: 11, color: '#a1a1aa', fontWeight: 600 }}>Download File or Folder</div>
                 <input
                   type="text"
                   value={remotePath}
                   onChange={(e) => setRemotePath(e.target.value)}
-                  placeholder="/workspace/filename"
+                  placeholder="/workspace/filename or /workspace/myfolder"
                   style={{ background: '#222228', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 8, padding: '8px 12px', fontSize: 12, outline: 'none' }}
                 />
                 <button 
                   onClick={handleDownload}
-                  style={{ width: '100%', background: 'rgba(255,255,255,0.08)', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 16px', fontWeight: 'bold', cursor: 'pointer' }}
+                  style={{ width: '100%', background: 'rgba(255,255,255,0.08)', color: '#fff', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '10px 16px', fontWeight: 'bold', cursor: 'pointer' }}
                 >
-                  ↓ Download
+                  ↓ Download File / Folder
                 </button>
               </div>
 

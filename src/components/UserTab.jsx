@@ -71,24 +71,32 @@ export default function UserTab({ user }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const requestSession = async (node) => {
-    if (!window.c3?.sendSessionReq) {
-      // Dev preview: don't fake a session
-      alert('C3 Desktop app required to request sessions.');
-      return;
-    }
+  const [selectedNode, setSelectedNode] = useState(null);
+
+  const confirmRequest = async (config) => {
+    if (!window.c3?.sendSessionReq || !selectedNode) return;
     try {
+      const node = selectedNode;
+      setSelectedNode(null);
       setWaiting(true);
       setDeclined(false);
       await window.c3.sendSessionReq({
         providerId:    node.userId,
-        environment:   'base',
-        cpuCores:      2,
-        ramGb:         4,
-        durationHours: 1,
-        cudaRequested: node.hasCuda || false,
+        environment:   config.environment,
+        cpuCores:      config.cpuCores,
+        ramGb:         config.ramGb,
+        durationHours: config.durationHours,
+        cudaRequested: config.cudaRequested,
       });
     } catch (e) { setWaiting(false); alert(e.message); }
+  };
+
+  const requestSession = (node) => {
+    if (!window.c3?.sendSessionReq) {
+      alert('C3 Desktop app required to request sessions.');
+      return;
+    }
+    setSelectedNode(node);
   };
 
   /* ── Routing ── */
@@ -213,7 +221,7 @@ export default function UserTab({ user }) {
 
       <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:0.5}50%{opacity:1}}`}</style>
 
-      {/* Chat panel — rendered outside the grid so it overlays properly */}
+      {/* Chat panel */}
       {chatTarget && (
         <ChatPanel
           myId={user?.userId}
@@ -223,6 +231,117 @@ export default function UserTab({ user }) {
           onClose={() => setChatTarget(null)}
         />
       )}
+
+      {/* Request Configuration Modal */}
+      {selectedNode && (
+        <RequestConfigModal
+          node={selectedNode}
+          onConfirm={confirmRequest}
+          onClose={() => setSelectedNode(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function RequestConfigModal({ node, onConfirm, onClose }) {
+  const maxCores = node.cpuCores || 8;
+  const maxRam   = node.totalRamGB || 16;
+  const [cpuCores, setCpuCores]           = useState(Math.min(4, maxCores));
+  const [ramGb, setRamGb]                 = useState(Math.min(8, maxRam));
+  const [cudaRequested, setCudaRequested] = useState(!!node.hasCuda);
+  const [environment, setEnvironment]     = useState('base');
+  const [durationHours, setDurationHours] = useState(1);
+
+  const coreOptions = [2, 4, 8, 16, 32].filter(c => c <= maxCores || c === 2);
+  const ramOptions  = [4, 8, 16, 32, 64].filter(r => r <= maxRam || r === 4);
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(10px)', zIndex: 100 }} />
+      <div style={{
+        position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+        zIndex: 101, width: 480, maxWidth: '92vw',
+        background: '#0e0e12', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 24,
+        padding: 28, boxShadow: '0 24px 80px rgba(0,0,0,0.8)', color: '#f8fafc'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+          <div>
+            <div style={{ fontWeight: 900, fontSize: 20, letterSpacing: '-0.5px' }}>Configure Compute Session</div>
+            <div style={{ fontSize: 12, color: '#71717a', marginTop: 4 }}>Node: {node.displayName || 'Remote Node'}</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.06)', border: 'none', color: '#a1a1aa', borderRadius: '50%', width: 28, height: 28, cursor: 'pointer', fontSize: 15 }}>×</button>
+        </div>
+
+        {/* CPU Cores */}
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#a1a1aa', marginBottom: 8, display: 'flex', justifyContent: 'space-between' }}>
+            <span>CPU Cores</span>
+            <span style={{ color: '#fff' }}>{cpuCores} Cores</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {coreOptions.map(c => (
+              <button key={c} onClick={() => setCpuCores(c)}
+                style={{ flex: 1, padding: '8px 0', borderRadius: 10, border: cpuCores === c ? '1.5px solid #22c55e' : '1px solid rgba(255,255,255,0.1)', background: cpuCores === c ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.03)', color: cpuCores === c ? '#22c55e' : '#a1a1aa', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                {c}C
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* RAM */}
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#a1a1aa', marginBottom: 8, display: 'flex', justifyContent: 'space-between' }}>
+            <span>Memory (RAM)</span>
+            <span style={{ color: '#fff' }}>{ramGb} GB RAM</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {ramOptions.map(r => (
+              <button key={r} onClick={() => setRamGb(r)}
+                style={{ flex: 1, padding: '8px 0', borderRadius: 10, border: ramGb === r ? '1.5px solid #3b82f6' : '1px solid rgba(255,255,255,0.1)', background: ramGb === r ? 'rgba(59,130,246,0.12)' : 'rgba(255,255,255,0.03)', color: ramGb === r ? '#60a5fa' : '#a1a1aa', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                {r}GB
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* GPU Toggle */}
+        <div style={{ marginBottom: 18, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 14, padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>NVIDIA GPU Acceleration</div>
+            <div style={{ fontSize: 11, color: '#71717a', marginTop: 2 }}>{node.gpuName || 'CUDA acceleration'}</div>
+          </div>
+          <input
+            type="checkbox"
+            checked={cudaRequested}
+            disabled={!node.hasCuda}
+            onChange={e => setCudaRequested(e.target.checked)}
+            style={{ width: 18, height: 18, accentColor: '#22c55e', cursor: node.hasCuda ? 'pointer' : 'not-allowed' }}
+          />
+        </div>
+
+        {/* Duration */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#a1a1aa', marginBottom: 8 }}>Session Duration</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[1, 2, 4, 8].map(h => (
+              <button key={h} onClick={() => setDurationHours(h)}
+                style={{ flex: 1, padding: '8px 0', borderRadius: 10, border: durationHours === h ? '1.5px solid #fff' : '1px solid rgba(255,255,255,0.1)', background: durationHours === h ? '#fff' : 'rgba(255,255,255,0.03)', color: durationHours === h ? '#000' : '#a1a1aa', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                {h}h
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Submit */}
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Cancel</button>
+          <button onClick={() => onConfirm({ cpuCores, ramGb, cudaRequested, environment, durationHours })}
+            style={{ flex: 2, padding: '12px', borderRadius: 12, border: 'none', background: '#fff', color: '#000', fontWeight: 800, fontSize: 14, cursor: 'pointer', boxShadow: '0 4px 20px rgba(255,255,255,0.2)' }}>
+            🚀 Confirm & Launch
+          </button>
+        </div>
+      </div>
+    </>
   );
 }

@@ -12,7 +12,7 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
     
     sessionIdRef.current = sessionId;
 
-    console.log('[WebRTC] Provider initializing peer for session:', sessionId);
+    setStatus('Gathering network STUN candidates...');
 
     // Instantiate SimplePeer as INITIATOR immediately on mount
     const peer = new SimplePeer({
@@ -22,6 +22,8 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
     });
@@ -29,7 +31,7 @@ export default function ProviderWebRTC({ sessionId, onConnected, onError, onClos
 
     peer.on('signal', data => {
       console.log('[WebRTC] Provider generated offer, storing in DynamoDB...');
-      setStatus('Waiting for user to connect...');
+      setStatus('Offer saved to DynamoDB — waiting for user answer...');
       window.c3.sendProviderOffer({ sessionId, offer: JSON.stringify(data) })
         .catch(err => {
           console.error('[WebRTC] Failed to send offer:', err);

@@ -271,7 +271,7 @@ ipcMain.handle('webrtc:provider-offer', async (_, { sessionId, offer }) => {
     } catch (e) {
       debugLog('warn', 'Poll error: ' + e.message);
     }
-  }, 1500);
+  }, 1000);
   
   // Store the poll so we can clean it up
   sessionPollMap.set('signal-' + sessionId, poll);
@@ -289,16 +289,22 @@ ipcMain.handle('webrtc:user-answer', async (_, { sessionId, answer }) => {
 // User requests terminal connection
 ipcMain.handle('terminal:connect', async (_, sessionId) => {
   debugLog('info', 'User requesting terminal connection', `sessionId=${sessionId}`);
-  const session = await dynamo.getSession(sessionId);
-  if (!session || session.status !== 'READY') {
-    throw new Error('Session not ready');
+  
+  // Retry up to 10 times (5 seconds) waiting for sdpOffer in DynamoDB
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      const session = await dynamo.getSession(sessionId);
+      if (session && session.sdpOffer) {
+        debugLog('ok', `✅ SDP offer found on attempt ${attempt}`);
+        return { offer: session.sdpOffer };
+      }
+    } catch (e) {
+      debugLog('warn', `Attempt ${attempt} fetching session error: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, 500));
   }
   
-  const offer = session.sdpOffer;
-  if (!offer) throw new Error('No SDP offer found in session');
-  
-  debugLog('ok', 'SDP offer returned to user renderer');
-  return { offer };
+  throw new Error('Provider offer not found (timed out waiting for offer in DynamoDB)');
 });
 
 ipcMain.handle('terminal:disconnect', async () => {
@@ -343,33 +349,48 @@ ipcMain.handle('file:save-download', async (_, { name, base64 }) => {
 
 // Provider side: write received upload bytes into the running Docker container
 ipcMain.handle('container:write-file', async (_, { sessionId, destPath, base64 }) => {
-  const container = require('./core/docker').getContainerRef(`c3-${sessionId}`);
-  // Write via docker exec: echo base64 | base64 -d > destPath
-  const ptyEntry = activePtyStreams.get(sessionId);
-  const stream = ptyEntry?.stream || ptyEntry;
-  if (!stream) throw new Error('No active PTY stream for session');
-  // Use a separate exec (not the PTY) to write the file silently
   const Docker = require('dockerode');
   const d = new Docker();
   const c = d.getContainer(`c3-${sessionId}`);
+
   const exec = await c.exec({
-    Cmd: ['bash', '-c', `echo '${base64}' | base64 -d > '${destPath}'`],
+    Cmd: ['bash', '-c', `mkdir -p "$(dirname "${destPath}")" && echo '${base64}' | base64 -d > '${destPath}'`],
     AttachStdout: true,
     AttachStderr: true,
   });
   const s = await exec.start({});
+  s.on('data', () => {});
   await new Promise((resolve) => s.on('end', resolve));
   return true;
 });
 
-// Provider side: read a file from the running Docker container and return base64
+// Provider side: read a file or folder from the running Docker container and return base64
 ipcMain.handle('container:read-file', async (_, { sessionId, srcPath }) => {
   const Docker = require('dockerode');
   const d = new Docker();
   const c = d.getContainer(`c3-${sessionId}`);
-  const name = require('path').basename(srcPath);
+
+  // Check if srcPath is a directory or file
+  const checkExec = await c.exec({ Cmd: ['bash', '-c', `test -d "${srcPath}" && echo "DIR" || echo "FILE"`] });
+  const checkStream = await checkExec.start({});
+  let type = '';
+  checkStream.on('data', chunk => { type += chunk.toString(); });
+  await new Promise(resolve => checkStream.on('end', resolve));
+  const isDir = type.includes('DIR');
+
+  const baseName = require('path').basename(srcPath);
+  let cmd = '';
+  let downloadName = baseName;
+
+  if (isDir) {
+    downloadName = `${baseName}.tar.gz`;
+    cmd = `tar -czf /tmp/c3_dl.tar.gz -C "$(dirname "${srcPath}")" "${baseName}" && base64 /tmp/c3_dl.tar.gz`;
+  } else {
+    cmd = `base64 "${srcPath}"`;
+  }
+
   const exec = await c.exec({
-    Cmd: ['base64', srcPath],
+    Cmd: ['bash', '-c', cmd],
     AttachStdout: true,
     AttachStderr: true,
   });
@@ -378,10 +399,7 @@ ipcMain.handle('container:read-file', async (_, { sessionId, srcPath }) => {
   s.on('data', chunk => chunks.push(chunk));
   await new Promise(resolve => s.on('end', resolve));
   const raw = Buffer.concat(chunks).toString();
-  // Docker exec output has an 8-byte header per frame — strip it
-  // Actually since Tty: false and AttachStdout: true the modem demuxes for us
-  // The output is the base64 content of the file
-  return { name, base64: raw.replace(/\s+/g, '') };
+  return { name: downloadName, base64: raw.replace(/\s+/g, '') };
 });
 
 // Provider renderer forwards user input to docker exec stdin
@@ -473,7 +491,7 @@ ipcMain.handle('market:request', async (_, payload) => {
         send('session:ready', { sessionId, status: session.status });
       }
     } catch (_) {}
-  }, 2000);
+  }, 1000);
 
   sessionPollMap.set(sessionId, poll);
   return { sessionId };

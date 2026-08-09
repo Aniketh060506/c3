@@ -32,7 +32,8 @@ async function startSession(sessionId, environment, cpuCores, ramGb, cudaRequest
   const containerConfig = {
     Image: image,
     name:  `c3-${sessionId}`,
-    Cmd: ['tail', '-f', '/dev/null'],
+    Cmd: ['bash', '-c', 'mkdir -p /workspace && tail -f /dev/null'],
+    WorkingDir: '/workspace',
     HostConfig: {
       CpuQuota:  cpuCores * 100000,
       CpuPeriod: 100000,
@@ -55,6 +56,7 @@ async function execShell(sessionId) {
   const container = docker.getContainer(`c3-${sessionId}`);
   const exec = await container.exec({
     Cmd: ['/bin/bash', '--login'],
+    WorkingDir: '/workspace',
     Env: [
       'TERM=xterm-256color',
       'COLORTERM=truecolor',
