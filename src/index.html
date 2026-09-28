@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.amazonaws.com" />
+    <title>C3 — Community Compute Cloud</title>
+    <script>
+      if (typeof global === 'undefined') {
+        window.global = window;
+      }
+      if (typeof process === 'undefined') {
+        window.process = {
+          env: {},
+          nextTick: function (fn, ...args) {
+            queueMicrotask(() => fn(...args));
+          }
+        };
+      } else if (!window.process.nextTick) {
+        window.process.nextTick = function (fn, ...args) {
+          queueMicrotask(() => fn(...args));
+        };
+      }
+      window.addEventListener('error', function(e) {
+        console.error('WINDOW ERROR:', e.message, e.filename, e.lineno, e.error);
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        console.error('PROMISE REJECTION:', e.reason);
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.jsx"></script>
+  </body>
+</html>

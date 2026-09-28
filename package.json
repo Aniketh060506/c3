@@ -1,0 +1,69 @@
+{
+  "name": "c3-community-compute-cloud",
+  "version": "3.0.0",
+  "description": "C3 v3 — Community Compute Cloud: distributed Kubernetes P2P compute sharing",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "npm run build-ui && electron .",
+    "build-ui": "vite build src --config vite.config.js",
+    "build": "npm run build-ui && electron-builder"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity": "^3.600.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.600.0",
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.1141.0",
+    "@aws-sdk/util-dynamodb": "^3.600.0",
+    "dockerode": "^4.0.2",
+    "electron": "^32.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "simple-peer": "^9.11.1",
+    "systeminformation": "^5.23.5",
+    "uuid": "^10.0.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.19",
+    "cross-env": "^7.0.3",
+    "electron-builder": "^24.13.3",
+    "postcss": "^8.4.40",
+    "tailwindcss": "^3.4.7",
+    "vite": "^5.3.5"
+  },
+  "build": {
+    "appId": "com.c3.community-compute-cloud",
+    "productName": "C3 Community Compute Cloud",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "core/**/*",
+      "aws-config.json",
+      "dist-ui/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    }
+  },
+  "allowScripts": {
+    "electron@32.3.3": true,
+    "esbuild@0.21.5": true,
+    "protobufjs@7.6.6": true,
+    "ssh2@1.17.0": true
+  }
+}

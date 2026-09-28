@@ -1,0 +1,8 @@
+{
+  "region": "ap-south-1",
+  "userPoolId": "YOUR_COGNITO_USER_POOL_ID",
+  "clientId": "YOUR_COGNITO_CLIENT_ID",
+  "clientSecret": "YOUR_COGNITO_CLIENT_SECRET",
+  "identityPoolId": "YOUR_COGNITO_IDENTITY_POOL_ID",
+  "tailscaleAuthKey": "tskey-auth-YOUR_TAILSCALE_KEY"
+}

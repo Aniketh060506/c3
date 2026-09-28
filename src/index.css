@@ -1,0 +1,131 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── AWS Cognito Pastel Theme (Image 2 style) ───────────────────────── */
+:root {
+  --bg-base:        #fafafa;
+  --bg-card:        #ffffff;
+  --bg-card-hover:  #f8fafc;
+  --bg-input:       #ffffff;
+  --border:         #e2e8f0;
+  --border-focus:   #2563eb;
+  --text-primary:   #0f172a;
+  --text-secondary: #475569;
+  --text-muted:     #94a3b8;
+  --accent:         #2563eb;
+  --accent-hover:   #1d4ed8;
+  --success:        #16a34a;
+  --warning:        #d97706;
+  --danger:         #dc2626;
+  --radius-sm:      8px;
+  --radius-md:      12px;
+  --radius-lg:      16px;
+}
+
+/* ── Base ────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: 
+    radial-gradient(circle at 90% 12%, rgba(254, 240, 138, 0.45) 0%, transparent 35%),
+    radial-gradient(circle at 8% 25%, rgba(219, 234, 254, 0.55) 0%, transparent 40%),
+    radial-gradient(circle at 88% 88%, rgba(233, 213, 255, 0.50) 0%, transparent 45%),
+    radial-gradient(circle at 12% 85%, rgba(254, 226, 226, 0.35) 0%, transparent 40%),
+    #fafafa;
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* ── Selection ───────────────────────────────────────────────────────── */
+::selection {
+  background: rgba(37, 99, 235, 0.15);
+  color: #1e3a8a;
+}
+
+/* ── Focus ring ──────────────────────────────────────────────────────── */
+*:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Component layer ─────────────────────────────────────────────────── */
+@layer components {
+  /* Cards */
+  .c3-card {
+    @apply rounded-2xl border bg-white border-slate-200/80 shadow-sm transition hover:shadow-md;
+  }
+
+  /* Buttons */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl
+           bg-blue-600 hover:bg-blue-700 active:bg-blue-800
+           text-white text-sm font-semibold shadow-sm
+           transition duration-150 cursor-pointer
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl
+           bg-slate-100 hover:bg-slate-200 active:bg-slate-300
+           text-slate-700 text-sm font-medium
+           border border-slate-200
+           transition duration-150 cursor-pointer
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl
+           bg-red-50 hover:bg-red-100 active:bg-red-200
+           text-red-600 hover:text-red-700
+           border border-red-200
+           text-sm font-medium
+           transition duration-150 cursor-pointer
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* Inputs */
+  .c3-input {
+    @apply w-full px-4 py-2.5 rounded-xl
+           bg-white border border-slate-200
+           text-slate-800 text-sm placeholder-slate-400
+           shadow-sm transition duration-150
+           focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20;
+  }
+}
