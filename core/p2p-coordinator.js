@@ -173,6 +173,37 @@ class P2PCoordinator {
         return;
       }
 
+      // GET /api/workspace/files (Serve workspace files to provider)
+      if (req.method === 'GET' && url.pathname === '/api/workspace/files') {
+        const wsDir = this.activeWorkspace;
+        if (!wsDir || !fs.existsSync(wsDir)) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'No active workspace configured' }));
+          return;
+        }
+
+        try {
+          const files = {};
+          const entries = fs.readdirSync(wsDir, { withFileTypes: true });
+          for (const ent of entries) {
+            if (ent.isFile()) {
+              const fullPath = path.join(wsDir, ent.name);
+              const stats = fs.statSync(fullPath);
+              // Only sync files under 10MB
+              if (stats.size < 10 * 1024 * 1024) {
+                files[ent.name] = fs.readFileSync(fullPath).toString('base64');
+              }
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, files }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+        return;
+      }
+
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found' }));
     });
@@ -477,6 +508,47 @@ class P2PCoordinator {
 
       req.write(payload);
       req.end();
+    });
+  }
+
+  setActiveWorkspace(wsPath) {
+    this.activeWorkspace = wsPath;
+  }
+
+  async syncWorkspaceFromConsumer({ consumerIp, targetDir }) {
+    if (!consumerIp || !targetDir) return false;
+    const fs = require('fs');
+    const path = require('path');
+    const http = require('http');
+
+    return new Promise((resolve) => {
+      const req = http.get(`http://${consumerIp}:${HTTP_PORT}/api/workspace/files`, (res) => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            if (data.ok && data.files) {
+              if (!fs.existsSync(targetDir)) {
+                fs.mkdirSync(targetDir, { recursive: true });
+              }
+              const count = Object.keys(data.files).length;
+              for (const [filename, b64Content] of Object.entries(data.files)) {
+                const dest = path.join(targetDir, filename);
+                fs.writeFileSync(dest, Buffer.from(b64Content, 'base64'));
+              }
+              console.log(`[P2P] Synced ${count} file(s) from consumer to ${targetDir}`);
+              resolve(true);
+            } else {
+              resolve(false);
+            }
+          } catch (_) {
+            resolve(false);
+          }
+        });
+      });
+      req.on('error', () => resolve(false));
+      req.setTimeout(8000, () => { req.destroy(); resolve(false); });
     });
   }
 

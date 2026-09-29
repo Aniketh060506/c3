@@ -400,21 +400,36 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
     return { ok: true, cwd: currentCwd, target: targetKey };
   }
 
-  const containers = getTargetContainers(targetKey);
-  const isParallel = containers.length > 1;
+  if (targetKey === 'both') {
+    const docker = getDocker();
+    const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
+    // 1. Run on control plane
+    try {
+      const outMaster = await runInContainer(masterContainer, `cd "${currentCwd}" && ${cleanCmd}`, 30000);
+      if (outMaster) {
+        outMaster.split('\n').forEach(line => onLog(`[control-plane] ${line}`));
+      }
+    } catch (err) {
+      onLog(`[control-plane] [ERROR] ${err.message}`);
+    }
+    // 2. Run on worker workload runner
+    try {
+      const outWorker = await runInContainer(masterContainer, `kubectl exec c3-worker-runner -- sh -c "cd '${currentCwd}' && ${cleanCmd}"`, 30000);
+      if (outWorker) {
+        outWorker.split('\n').forEach(line => onLog(`[worker-node] ${line}`));
+      }
+    } catch (err) {
+      onLog(`[worker-node] [ERROR] ${err.message}`);
+    }
+    return { ok: true, cwd: currentCwd, target: 'both' };
+  }
 
+  const containers = getTargetContainers(targetKey);
   for (const { name, container } of containers) {
     try {
-      // Execute directly in currentCwd (without parentheses so directory change is not in a subshell)
       const output = await runInContainer(container, `cd "${currentCwd}" && ${cleanCmd}`, 30000);
       if (output) {
-        output.split('\n').forEach(line => {
-          if (isParallel) {
-            onLog(`[${name}] ${line}`);
-          } else {
-            onLog(line);
-          }
-        });
+        output.split('\n').forEach(line => onLog(line));
       }
     } catch (err) {
       onLog(`[${name}] [ERROR] ${err.message}`);

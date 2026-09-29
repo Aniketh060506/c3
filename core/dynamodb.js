@@ -280,19 +280,23 @@ async function declineClusterRequest(sessionId, providerId) {
  * @param {string} sessionId
  * @param {string} meshIp
  */
-async function setClusterMasterMeshIp(sessionId, meshIp) {
+async function setClusterMasterMeshIp(sessionId, meshIp, k3sToken) {
   const client = await getClient();
+  const updateExp = k3sToken
+    ? 'SET consumerMeshIp = :ip, k3sToken = :token, clusterStatus = :bs, updatedAt = :now'
+    : 'SET consumerMeshIp = :ip, clusterStatus = :bs, updatedAt = :now';
+  const expValues = {
+    ':ip': meshIp,
+    ':bs': 'BOOTSTRAPPING',
+    ':now': Date.now(),
+    ...(k3sToken ? { ':token': k3sToken } : {}),
+  };
   await client.send(
     new UpdateCommand({
       TableName: 'c3_sessions',
       Key: { sessionId },
-      UpdateExpression:
-        'SET consumerMeshIp = :ip, clusterStatus = :bs, updatedAt = :now',
-      ExpressionAttributeValues: {
-        ':ip': meshIp,
-        ':bs': 'BOOTSTRAPPING',
-        ':now': Date.now(),
-      },
+      UpdateExpression: updateExp,
+      ExpressionAttributeValues: expValues,
     })
   );
 }

@@ -670,11 +670,19 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   }
 
   pushToRenderer('cluster:log', '[c3] Bootstrapping K3s master control plane in Docker...');
-  await k3s.startMasterNode({
-    meshIp: masterIp,
-    clusterToken,
-    localWorkspacePath: workspacePath,
-  });
+  let masterRes;
+  try {
+    masterRes = await k3s.startMasterNode({
+      meshIp: masterIp,
+      clusterToken,
+      localWorkspacePath: workspacePath,
+    });
+    if (masterRes?.clusterToken) {
+      clusterToken = masterRes.clusterToken;
+    }
+  } catch (mErr) {
+    throw mErr;
+  }
   pushToRenderer('cluster:log', '✓ K3s master control plane active and accepting worker nodes.');
   k3s.exportHostKubeconfig().catch(() => {});
   k3s.deployDefaultPods().catch(() => {});
@@ -704,7 +712,7 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
 
   if (!demoSessionUser) {
     try {
-      await dynamo.setClusterMasterMeshIp(sessionId, masterIp);
+      await dynamo.setClusterMasterMeshIp(sessionId, masterIp, clusterToken);
       await dynamo.setClusterStatus(sessionId, 'ACTIVE');
     } catch (_) {}
   }
@@ -730,6 +738,8 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
       pushToRenderer('cluster:log', `✗ Provider "${prov.displayName}" join failed: ${err.message}`);
     });
   }
+
+  p2p.setActiveWorkspace(workspacePath);
 
   currentSession = {
     sessionId,
@@ -763,7 +773,20 @@ ipcMain.handle('cluster:accept', async (_e, { sessionId }) => {
   // Retrieve masterIp and token from request or DynamoDB session
   let masterAddress = req?.masterIp || req?.consumerMeshIp || req?.consumerIp;
   let token = req?.clusterToken || req?.k3sToken;
-  let providerWorkspace = req?.workspacePath || null;
+
+  // Set up local provider workspace and auto-sync files from consumer over P2P
+  const localWsDir = path.join(os.homedir(), 'c3_workspace');
+  if (!fs.existsSync(localWsDir)) {
+    try { fs.mkdirSync(localWsDir, { recursive: true }); } catch (_) {}
+  }
+  const syncSourceIp = req?.consumerIp || req?.masterIp;
+  if (syncSourceIp) {
+    pushToRenderer('cluster:log', `[c3] Syncing workspace files from consumer at ${syncSourceIp}...`);
+    try {
+      await p2p.syncWorkspaceFromConsumer({ consumerIp: syncSourceIp, targetDir: localWsDir });
+    } catch (_) {}
+  }
+  let providerWorkspace = localWsDir;
 
   if (!masterAddress || !token) {
     pushToRenderer('cluster:log', `[c3] Fetching session credentials from DynamoDB for session ${sessionId}...`);
