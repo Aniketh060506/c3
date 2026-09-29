@@ -25,6 +25,7 @@ const k3s = require('./core/k3s-cluster');
 const hardware = require('./core/hardware');
 const dispatcher = require('./core/task-dispatcher');
 const setupChecker = require('./core/setup-checker');
+const p2p = require('./core/p2p-coordinator');
 let awsConfig;
 try {
   awsConfig = require('./aws-config.json');
