@@ -201,6 +201,22 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false,
     binds.push(`${localWorkspacePath}:/workspace:rw`);
   }
 
+  // Ensure old node password entry is cleared from master before starting
+  try {
+    const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
+    const nodeName2 = targetNodeName;
+    const clearExec = await masterContainer.exec({
+      Cmd: ['/bin/sh', '-c',
+        `kubectl delete node ${nodeName2} 2>/dev/null; ` +
+        `grep -v '${nodeName2}' /var/lib/rancher/k3s/server/cred/passwd > /tmp/p 2>/dev/null && mv /tmp/p /var/lib/rancher/k3s/server/cred/passwd 2>/dev/null; ` +
+        `echo cleared`
+      ],
+      AttachStdout: false,
+      AttachStderr: false,
+    });
+    await clearExec.start({ hijack: true, stdin: false });
+  } catch (_) {}
+
   const container = await docker.createContainer({
     name: WORKER_CONTAINER_NAME,
     Image: resolvedImage,
