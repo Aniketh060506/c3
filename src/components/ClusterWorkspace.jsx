@@ -141,7 +141,7 @@ function NetworkDebugPanel() {
           {/* JuiceFS */}
           <div>
             <div className="flex items-center gap-1.5 mb-2">
-              <Dot ok={net.juicefs?.mounted} />
+              <Dot ok={net.juicefs?.mounted || !!session?.workspacePath} />
               <span className="text-[11px] font-black text-slate-700">Shared Storage</span>
               {net.juicefs?.backend && (
                 <span className="ml-auto text-[10px] font-mono font-bold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded border border-purple-200">
@@ -168,9 +168,19 @@ function NetworkDebugPanel() {
                   </>
                 )}
               </div>
+            ) : session?.workspacePath ? (
+              <div className="bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2 text-[10px] font-mono space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-emerald-700 font-bold">Mount: /workspace ✓</span>
+                  <span className="text-emerald-700 text-[9px] font-bold bg-emerald-100/70 px-1.5 py-0.5 rounded">DIRECT NVMe</span>
+                </div>
+                <div className="text-[10px] text-slate-600 truncate font-mono">
+                  {session.workspacePath}
+                </div>
+              </div>
             ) : (
               <div className="text-[10px] text-amber-600 font-mono bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
-                /workspace not mounted via JuiceFS — using host path bind-mount
+                No workspace mounted
               </div>
             )}
           </div>
