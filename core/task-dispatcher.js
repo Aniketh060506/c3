@@ -286,7 +286,7 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
     const rawDest = trimmed.replace(/^cd\s*/i, '').trim();
     const dest = (!rawDest || rawDest === '~') ? '/workspace' : rawDest;
 
-    if (targetKey === 'pod' || targetKey === 'node-2') {
+    if (targetKey === 'pod') {
       const docker = getDocker();
       const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
       try {
@@ -294,7 +294,6 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
         const line = (out || '').split('\n').map(l => l.trim()).filter(Boolean).pop();
         if (line && line.startsWith('/')) {
           nodeCwds['pod'] = line;
-          nodeCwds['node-2'] = line;
           return { ok: true, cwd: line, target: targetKey };
         } else {
           onLog(`c3-worker-runner: cd: ${dest}: No such file or directory`);
@@ -385,8 +384,8 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
     cleanCmd = `ls -lh`;
   }
 
-  // If targeting dedicated workload Pod or worker node directly
-  if (targetKey === 'pod' || targetKey === 'node-2') {
+  // If targeting dedicated workload Pod
+  if (targetKey === 'pod') {
     const docker = getDocker();
     const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
     try {

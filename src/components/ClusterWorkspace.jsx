@@ -67,7 +67,7 @@ function Dot({ ok, pulse }) {
 }
 
 // ── Network Debug Panel ───────────────────────────────────────────────────────
-function NetworkDebugPanel() {
+function NetworkDebugPanel({ session }) {
   const [net, setNet] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastChecked, setLastChecked] = useState(null);
@@ -490,7 +490,7 @@ Interactive cluster shell ready. Use 'cd' to navigate or click quick buttons.\n`
           </div>
 
           {/* Network Debug Panel */}
-          <NetworkDebugPanel />
+          <NetworkDebugPanel session={session} />
         </div>
       </div>
 

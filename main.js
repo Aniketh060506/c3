@@ -685,7 +685,10 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   }
   pushToRenderer('cluster:log', '✓ K3s master control plane active and accepting worker nodes.');
   k3s.exportHostKubeconfig().catch(() => {});
-  k3s.deployDefaultPods().catch(() => {});
+  try {
+    await k3s.deployDefaultPods();
+    pushToRenderer('cluster:log', '✓ Workload runner pod and Redis deployed.');
+  } catch (_) {}
 
   // ── Compute Worker Node ──────────────────────────────────────────────────
   // If external provider is selected, consumer is purely the Master Control Plane.
