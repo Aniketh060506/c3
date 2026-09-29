@@ -677,6 +677,7 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   });
   pushToRenderer('cluster:log', '✓ K3s master control plane active and accepting worker nodes.');
   k3s.exportHostKubeconfig().catch(() => {});
+  k3s.deployDefaultPods().catch(() => {});
 
   // ── Auto-start a local worker node on this same machine ───────────────────
   // This makes the consumer machine contribute its own CPU/RAM as a K3s worker.

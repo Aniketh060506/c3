@@ -333,10 +333,78 @@ async function exportHostKubeconfig() {
   }
 }
 
+async function deployDefaultPods() {
+  const docker = getDocker();
+  try {
+    const container = docker.getContainer(MASTER_CONTAINER_NAME);
+    const manifests = `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: c3-worker-runner
+  namespace: default
+spec:
+  restartPolicy: Always
+  tolerations:
+  - operator: "Exists"
+  containers:
+  - name: runner
+    image: python:3.10-slim
+    command: ["/bin/sh", "-c", "sleep 86400"]
+    volumeMounts:
+    - name: workspace-storage
+      mountPath: /workspace
+  volumes:
+  - name: workspace-storage
+    hostPath:
+      path: /workspace
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: redis
+  namespace: default
+  labels:
+    app: redis
+spec:
+  restartPolicy: Always
+  tolerations:
+  - operator: "Exists"
+  containers:
+  - name: redis
+    image: redis:alpine
+    ports:
+    - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: default
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+`;
+    const exec = await container.exec({
+      Cmd: ['/bin/sh', '-c', `cat <<'EOF' | kubectl apply -f -\n${manifests}\nEOF`],
+      AttachStdout: true,
+      AttachStderr: true,
+    });
+    await exec.start({ hijack: true, stdin: false });
+    console.log('[k3s] Default workload pods (c3-worker-runner & redis) deployed.');
+  } catch (err) {
+    console.warn('[k3s] deployDefaultPods note:', err.message);
+  }
+}
+
 module.exports = {
   startMasterNode,
   startWorkerNode,
   stopCluster,
   getClusterNodes,
   exportHostKubeconfig,
+  deployDefaultPods,
 };
