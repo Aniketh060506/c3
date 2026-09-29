@@ -679,26 +679,28 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   k3s.exportHostKubeconfig().catch(() => {});
   k3s.deployDefaultPods().catch(() => {});
 
-  // ── Auto-start a local worker node on this same machine ───────────────────
-  // This makes the consumer machine contribute its own CPU/RAM as a K3s worker.
-  // The worker joins via 127.0.0.1 (same host) so no Tailscale needed for self-join.
-  pushToRenderer('cluster:log', '[c3] Joining self as local compute worker node...');
-  try {
-    const specsForWorker = await hardware.getHardwareSpecs(); // instant — cached
-    const hasNvidiaGpu = specsForWorker.gpuVendor === 'NVIDIA';
-    await k3s.startWorkerNode({
-      masterMeshIp: '127.0.0.1', // same machine — use loopback
-      clusterToken,
-      gpuEnabled: hasNvidiaGpu,
-      localWorkspacePath: workspacePath,
-    });
-    pushToRenderer('cluster:log', '✓ Local worker node joined — this machine contributes both control plane and compute resources.');
-  } catch (workerErr) {
-    // Non-fatal — cluster still works with just the master
-    pushToRenderer('cluster:log', `[c3] Note: Self-worker join: ${workerErr.message} — cluster continues with master node only.`);
-    console.warn('[k3s] Self-worker start note:', workerErr.message);
+  // ── Compute Worker Node ──────────────────────────────────────────────────
+  // If external provider is selected, consumer is purely the Master Control Plane.
+  // Only start local worker if no external providers are selected (solo mode).
+  if (!providerIds || providerIds.length === 0) {
+    pushToRenderer('cluster:log', '[c3] Solo mode: joining self as local compute worker node...');
+    try {
+      const specsForWorker = await hardware.getHardwareSpecs();
+      const hasNvidiaGpu = specsForWorker.gpuVendor === 'NVIDIA';
+      await k3s.startWorkerNode({
+        masterMeshIp: '127.0.0.1',
+        clusterToken,
+        gpuEnabled: hasNvidiaGpu,
+        localWorkspacePath: workspacePath,
+        nodeName: 'c3-worker-local',
+      });
+      pushToRenderer('cluster:log', '✓ Local worker node joined.');
+    } catch (workerErr) {
+      console.warn('[k3s] Self-worker start note:', workerErr.message);
+    }
+  } else {
+    pushToRenderer('cluster:log', `[c3] Master Control Plane active. Awaiting connection from ${providerIds.length} provider worker node(s)...`);
   }
-  // ─────────────────────────────────────────────────────────────────────────
 
   if (!demoSessionUser) {
     try {

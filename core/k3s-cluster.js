@@ -151,6 +151,7 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath }) {
       '--tls-san=127.0.0.1',
       '--tls-san=localhost',
       '--node-ip=' + meshIp,
+      '--node-name=c3-control-plane',
     ],
     Env: ['K3S_TOKEN=' + clusterToken],
     HostConfig: {

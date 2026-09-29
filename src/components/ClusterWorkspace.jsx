@@ -266,7 +266,7 @@ Interactive cluster shell ready. Use 'cd' to navigate or click quick buttons.\n`
 
   const getTargetNodeLabel = useCallback((t) => {
     if (t === 'pod' || t === 'runner') return 'c3-worker-runner';
-    if (t === 'node-2' || t === 'worker') return 'c3-self-worker';
+    if (t === 'node-2' || t === 'worker') return 'c3-worker';
     if (t === 'both' || t === 'all') return 'cluster-all';
     return 'control-plane';
   }, []);
