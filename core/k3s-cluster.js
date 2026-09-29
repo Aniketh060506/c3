@@ -402,6 +402,7 @@ metadata:
   name: c3-worker-runner
   namespace: default
 spec:
+  nodeName: c3-control-plane
   restartPolicy: Always
   tolerations:
   - operator: "Exists"

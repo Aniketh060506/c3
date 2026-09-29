@@ -686,10 +686,16 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   }
   pushToRenderer('cluster:log', '✓ K3s master control plane active and accepting worker nodes.');
   k3s.exportHostKubeconfig().catch(() => {});
-  try {
-    await k3s.deployDefaultPods();
-    pushToRenderer('cluster:log', '✓ Workload runner pod and Redis deployed.');
-  } catch (_) {}
+
+  // ── Deploy default pods ASYNC — do NOT block ACTIVE status ───────────────
+  // python:3.10-slim needs to pull (~150MB) + pod needs to start.
+  // This takes 1-5 min. We push ACTIVE immediately so the terminal opens.
+  // The pod watchdog (startPodWatchdog) will redeploy if not Running.
+  k3s.deployDefaultPods().then(() => {
+    pushToRenderer('cluster:log', '✓ Workload runner pod (c3-worker-runner) is Running. /workspace is mounted.');
+  }).catch(err => {
+    pushToRenderer('cluster:log', `[c3] Pod deploy note: ${err.message} — watchdog will retry.`);
+  });
 
   // ── Compute Worker Node ──────────────────────────────────────────────────
   // If external provider is selected, consumer is purely the Master Control Plane.
@@ -734,8 +740,8 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
       providerPort: prov.port || 44344,
       sessionId,
       workspacePath,
-      masterIp,        // ← now forwarded correctly
-      clusterToken,    // ← now forwarded correctly
+      masterIp,
+      clusterToken,
     }).then(() => {
       pushToRenderer('cluster:log', `✓ Provider "${prov.displayName}" accepted the cluster invitation.`);
     }).catch((err) => {
