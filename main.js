@@ -25,8 +25,22 @@ const k3s = require('./core/k3s-cluster');
 const hardware = require('./core/hardware');
 const dispatcher = require('./core/task-dispatcher');
 const setupChecker = require('./core/setup-checker');
-const p2p = require('./core/p2p-coordinator');
-const awsConfig = require('./aws-config.json');
+let awsConfig;
+try {
+  awsConfig = require('./aws-config.json');
+} catch {
+  awsConfig = {
+    region: 'ap-south-1',
+    userPoolId: 'ap-south-1_1FuIqpNq2',
+    clientId: '7frk04l4hn042tssu6rpievuf3',
+    clientSecret: 'gijgjmh3ig3kbtqrr26tqfr4g53gnigbpl1q1r6hnbdmef0rfrl',
+    identityPoolId: 'ap-south-1:65a4b02e-18e7-47b1-ab84-d8877f9b10e2',
+    tailscaleAuthKey: 'tskey-auth-kuxGWyFp7S11CNTRL-Mb8qcGZZXMTVErF3YUjjMTB61TSWNgLg',
+  };
+  try {
+    fs.writeFileSync(path.join(__dirname, 'aws-config.json'), JSON.stringify(awsConfig, null, 2), 'utf8');
+  } catch (_) {}
+}
 
 // ── Persistence Paths ──────────────────────────────────────────────────────
 const SESSION_FILE = path.join(app.getPath('userData'), 'c3_session.json');

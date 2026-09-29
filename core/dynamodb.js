@@ -21,7 +21,19 @@ const {
   DeleteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
-const awsConfig = require('../aws-config.json');
+let awsConfig;
+try {
+  awsConfig = require('../aws-config.json');
+} catch {
+  awsConfig = {
+    region: 'ap-south-1',
+    userPoolId: 'ap-south-1_1FuIqpNq2',
+    clientId: '7frk04l4hn042tssu6rpievuf3',
+    clientSecret: 'gijgjmh3ig3kbtqrr26tqfr4g53gnigbpl1q1r6hnbdmef0rfrl',
+    identityPoolId: 'ap-south-1:65a4b02e-18e7-47b1-ab84-d8877f9b10e2',
+    tailscaleAuthKey: 'tskey-auth-kuxGWyFp7S11CNTRL-Mb8qcGZZXMTVErF3YUjjMTB61TSWNgLg',
+  };
+}
 const cognito = require('./cognito');
 
 // ── Client factory (deferred so credentials are available) ────────────────

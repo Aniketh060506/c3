@@ -12,6 +12,7 @@ const Docker = require('dockerode');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 
+const os = require('os');
 const execAsync = promisify(exec);
 
 const K3S_IMAGE = 'c3-k3s:latest';
@@ -46,6 +47,9 @@ async function ensureImage(image = K3S_IMAGE) {
   } catch {
     try {
       await docker.getImage(FALLBACK_K3S_IMAGE).inspect();
+      try {
+        await docker.getImage(FALLBACK_K3S_IMAGE).tag({ repo: 'c3-k3s', tag: 'latest' });
+      } catch (_) {}
       return FALLBACK_K3S_IMAGE;
     } catch {
       console.log(`[k3s] Pulling image ${FALLBACK_K3S_IMAGE}...`);
@@ -59,6 +63,9 @@ async function ensureImage(image = K3S_IMAGE) {
         });
       });
       console.log(`[k3s] Image pulled: ${FALLBACK_K3S_IMAGE}`);
+      try {
+        await docker.getImage(FALLBACK_K3S_IMAGE).tag({ repo: 'c3-k3s', tag: 'latest' });
+      } catch (_) {}
       return FALLBACK_K3S_IMAGE;
     }
   }
@@ -125,14 +132,14 @@ async function waitForK3sReady(container, timeoutMs = 120000) {
  * @returns {Promise<{containerId: string}>}
  */
 async function startMasterNode({ meshIp, clusterToken, localWorkspacePath }) {
-  await ensureImage(K3S_IMAGE);
+  const resolvedImage = await ensureImage(K3S_IMAGE);
   await removeContainerIfExists(MASTER_CONTAINER_NAME);
 
   const docker = getDocker();
 
   const container = await docker.createContainer({
     name: MASTER_CONTAINER_NAME,
-    Image: K3S_IMAGE,
+    Image: resolvedImage,
     Cmd: [
       'server',
       '--disable=traefik',
@@ -172,11 +179,11 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath }) {
  * Starts a K3s agent (worker) node in Docker.
  * Connects to the master via Tailscale mesh IP.
  *
- * @param {{masterMeshIp: string, clusterToken: string, gpuEnabled?: boolean}} opts
+ * @param {{masterMeshIp: string, clusterToken: string, gpuEnabled?: boolean, nodeName?: string, localWorkspacePath?: string}} opts
  * @returns {Promise<{containerId: string}>}
  */
-async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false, localWorkspacePath }) {
-  await ensureImage(K3S_IMAGE);
+async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false, localWorkspacePath, nodeName }) {
+  const resolvedImage = await ensureImage(K3S_IMAGE);
   await removeContainerIfExists(WORKER_CONTAINER_NAME);
 
   const docker = getDocker();
@@ -185,8 +192,8 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false,
     ? [{ Driver: 'nvidia', Count: -1, Capabilities: [['gpu']] }]
     : [];
 
-  // Use a fixed node name so it shows clearly in kubectl get nodes
-  const nodeName = 'c3-self-worker';
+  // Use a dynamic node name so multiple worker laptops can join without name collisions!
+  const targetNodeName = nodeName || `c3-worker-${os.hostname().toLowerCase().replace(/[^a-z0-9]/g, '')}`;
 
   const binds = ['/lib/modules:/lib/modules:ro'];
   if (localWorkspacePath) {
@@ -195,11 +202,11 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false,
 
   const container = await docker.createContainer({
     name: WORKER_CONTAINER_NAME,
-    Image: K3S_IMAGE,
+    Image: resolvedImage,
     Cmd: [
       'agent',
       '--server=https://' + masterMeshIp + ':' + K3S_API_PORT,
-      '--node-name=' + nodeName,
+      '--node-name=' + targetNodeName,
     ],
     Env: [
       'K3S_URL=https://' + masterMeshIp + ':' + K3S_API_PORT,
