@@ -408,8 +408,8 @@ spec:
   - operator: "Exists"
   containers:
   - name: runner
-    image: python:3.10-slim
-    command: ["/bin/sh", "-c", "sleep 86400"]
+    image: alpine:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
     volumeMounts:
     - name: workspace-storage
       mountPath: /workspace
@@ -461,9 +461,11 @@ spec:
     });
     console.log('[k3s] Default workload pods (c3-worker-runner & redis) applied — waiting for Running...');
 
-    // ── Poll until c3-worker-runner is Running (up to 2 minutes) ─────────
-    const deadline = Date.now() + 120_000;
+    // ── Poll until c3-worker-runner is Running (up to 5 minutes) ─────────
+    // alpine:latest is ~5MB so should pull fast via K3s containerd
+    const deadline = Date.now() + 300_000;
     let podRunning = false;
+    let lastPhase = '';
     while (Date.now() < deadline) {
       try {
         const phaseExec = await container.exec({
@@ -485,12 +487,16 @@ spec:
           podRunning = true;
           break;
         }
-        console.log(`[k3s] c3-worker-runner phase: ${phase || 'pending'} — retrying...`);
+        // Only log when phase changes to avoid spam
+        if (phase !== lastPhase) {
+          console.log(`[k3s] c3-worker-runner phase: ${phase || 'pending'} — waiting for image pull...`);
+          lastPhase = phase;
+        }
       } catch (_) {}
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 5000));
     }
     if (!podRunning) {
-      console.warn('[k3s] c3-worker-runner did not reach Running within 2 minutes — continuing anyway.');
+      console.warn('[k3s] c3-worker-runner did not reach Running within 5 minutes — continuing anyway.');
     }
 
     // ── Sync /workspace files from master into pod via kubectl cp ─────────

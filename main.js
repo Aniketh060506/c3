@@ -880,7 +880,7 @@ ipcMain.handle('cluster:stop', async () => {
   return { ok: true };
 });
 
-// ── Pod watchdog: if runner pod is missing while session is active, redeploy ──
+// ── Pod watchdog: if runner pod is missing/failed, redeploy ──────────────────
 let _podWatchdogTimer = null;
 function startPodWatchdog() {
   if (_podWatchdogTimer) return;
@@ -895,12 +895,18 @@ function startPodWatchdog() {
         { timeout: 8000 }
       );
       const phase = stdout.trim();
-      if (phase !== 'Running') {
-        console.log(`[watchdog] c3-worker-runner phase="${phase}" — redeploying...`);
-        pushToRenderer('cluster:log', '[c3] Watchdog: workload pod not running — redeploying...');
-        await k3s.deployDefaultPods().catch(() => {});
-        pushToRenderer('cluster:log', '✓ Workload pod redeployed by watchdog.');
+      // ⚠ Do NOT redeploy if Pending/ContainerCreating — image is still pulling
+      // Only redeploy if pod is Failed or completely gone
+      if (phase === 'Running') return; // all good
+      if (phase === 'Pending' || phase === 'ContainerCreating') {
+        console.log(`[watchdog] c3-worker-runner is ${phase} — waiting for image pull, not redeploying.`);
+        return;
       }
+      // Failed, Succeeded (exited), Unknown, or empty (NotFound)
+      console.log(`[watchdog] c3-worker-runner phase="${phase}" — redeploying...`);
+      pushToRenderer('cluster:log', `[c3] Watchdog: pod is ${phase || 'gone'} — redeploying workload pod...`);
+      await k3s.deployDefaultPods().catch(() => {});
+      pushToRenderer('cluster:log', '✓ Workload pod redeployed by watchdog.');
     } catch (_) {}
   }, 30_000);
 }
