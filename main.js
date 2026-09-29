@@ -663,6 +663,7 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
         providerIds,
         k3sToken: clusterToken,
         tailscaleAuthKey,
+        consumerMeshIp: masterIp,
       });
     } catch (e) {
       console.warn('[dynamo] createClusterSession note:', e.message);

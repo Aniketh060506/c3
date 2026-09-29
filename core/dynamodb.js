@@ -196,7 +196,7 @@ async function createClusterSession(sessionData) {
         providersStatus,
         k3sToken: sessionData.k3sToken,
         tailscaleAuthKey: sessionData.tailscaleAuthKey,
-        consumerMeshIp: null,
+        consumerMeshIp: sessionData.consumerMeshIp || sessionData.masterIp || null,
         clusterStatus: 'NEGOTIATING',
         createdAt: Date.now(),
         updatedAt: Date.now(),
