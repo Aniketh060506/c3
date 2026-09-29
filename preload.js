@@ -145,6 +145,7 @@ contextBridge.exposeInMainWorld('c3', {
    * @returns {Promise<{ok: boolean}>}
    */
   stopCluster: () => ipcRenderer.invoke('cluster:stop'),
+  redeployPods: () => ipcRenderer.invoke('cluster:redeploy-pods'),
 
   // ── Credits ───────────────────────────────────────────────────────────
   /**

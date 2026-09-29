@@ -458,7 +458,68 @@ spec:
       stream.on('error', resolve);
       setTimeout(resolve, 8000);
     });
-    console.log('[k3s] Default workload pods (c3-worker-runner & redis) deployed.');
+    console.log('[k3s] Default workload pods (c3-worker-runner & redis) applied — waiting for Running...');
+
+    // ── Poll until c3-worker-runner is Running (up to 2 minutes) ─────────
+    const deadline = Date.now() + 120_000;
+    let podRunning = false;
+    while (Date.now() < deadline) {
+      try {
+        const phaseExec = await container.exec({
+          Cmd: ['kubectl', 'get', 'pod', 'c3-worker-runner',
+            '-o', 'jsonpath={.status.phase}', '--request-timeout=5s'],
+          AttachStdout: true,
+          AttachStderr: true,
+        });
+        const phaseStream = await phaseExec.start({ hijack: true, stdin: false });
+        const phase = await new Promise((resolve) => {
+          let buf = '';
+          phaseStream.on('data', chunk => (buf += chunk.toString()));
+          phaseStream.on('end', () => resolve(buf.trim()));
+          phaseStream.on('error', () => resolve(''));
+          setTimeout(() => resolve(buf.trim()), 6000);
+        });
+        if (phase === 'Running') {
+          console.log('[k3s] c3-worker-runner pod is Running.');
+          podRunning = true;
+          break;
+        }
+        console.log(`[k3s] c3-worker-runner phase: ${phase || 'pending'} — retrying...`);
+      } catch (_) {}
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    if (!podRunning) {
+      console.warn('[k3s] c3-worker-runner did not reach Running within 2 minutes — continuing anyway.');
+    }
+
+    // ── Sync /workspace files from master into pod via kubectl cp ─────────
+    // Pod already mounts the same hostPath (/workspace) as master, so files
+    // are identical. kubectl cp is a belt-and-suspenders copy that also
+    // ensures late-arriving files (synced after pod start) are visible.
+    try {
+      const cpExec = await container.exec({
+        Cmd: ['/bin/sh', '-c',
+          'count=$(ls /workspace 2>/dev/null | wc -l | tr -d " "); ' +
+          'echo "[k3s] /workspace has $count files on master"; ' +
+          'if [ "$count" -gt "0" ]; then ' +
+          '  kubectl cp /workspace/. c3-worker-runner:/workspace/ 2>/dev/null && echo "[k3s] kubectl cp done"; ' +
+          'fi'
+        ],
+        AttachStdout: true,
+        AttachStderr: true,
+      });
+      const cpStream = await cpExec.start({ hijack: true, stdin: false });
+      const cpOut = await new Promise(resolve => {
+        let buf = '';
+        cpStream.on('data', chunk => (buf += chunk.toString()));
+        cpStream.on('end', () => resolve(buf.trim()));
+        cpStream.on('error', () => resolve(''));
+        setTimeout(() => resolve(buf.trim()), 30_000); // 30s max for large workspace
+      });
+      console.log('[k3s] Workspace sync:', cpOut || 'done');
+    } catch (cpErr) {
+      console.warn('[k3s] kubectl cp workspace note:', cpErr.message);
+    }
   } catch (err) {
     console.warn('[k3s] deployDefaultPods note:', err.message);
   }

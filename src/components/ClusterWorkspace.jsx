@@ -167,6 +167,20 @@ function NetworkDebugPanel({ session }) {
                     </div>
                   </>
                 )}
+                {net.juicefs.files && net.juicefs.files.length > 0 && (
+                  <div className="pt-1 border-t border-slate-200 mt-1">
+                    <div className="text-[9px] text-slate-400 font-bold uppercase tracking-wider mb-1">
+                      Files ({net.juicefs.fileCount ?? net.juicefs.files.length}{net.juicefs.fileCount > net.juicefs.files.length ? ` shown: first ${net.juicefs.files.length}` : ''})
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {net.juicefs.files.map((f, i) => (
+                        <span key={i} className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[9px] text-slate-600 truncate max-w-[120px]" title={f}>
+                          {f}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : session?.workspacePath ? (
               <div className="bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2 text-[10px] font-mono space-y-1">
@@ -542,6 +556,12 @@ Interactive cluster shell ready. Use 'cd' to navigate or click quick buttons.\n`
             <span className="text-[11px] font-mono text-slate-400">
               <strong className="text-slate-600">Enter</strong> to run · <strong className="text-slate-600">Ctrl+C</strong> to cancel
             </span>
+            <QuickCmd label="↻ Pods" color="blue" onClick={async () => {
+              push('[c3] Redeploying workload pods...');
+              try {
+                if (window.c3?.redeployPods) await window.c3.redeployPods();
+              } catch (e) { push('[ERROR] ' + e.message); }
+            }} />
             <QuickCmd label="clear" color="red" onClick={() => setLines([])} />
           </div>
         </div>
