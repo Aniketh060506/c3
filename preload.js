@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('c3', {
    */
   login: (email, password) => ipcRenderer.invoke('auth:login', { email, password }),
   openHostedLogin: () => ipcRenderer.invoke('auth:open-hosted-login'),
+  openAwsLogin: () => ipcRenderer.invoke('auth:open-aws-login'),
 
   /**
    * Register a new account.
@@ -44,9 +45,23 @@ contextBridge.exposeInMainWorld('c3', {
 
   /**
    * Get the current authenticated user's profile.
-   * @returns {Promise<{userId: string, email: string, credits: number}|null>}
+   * @returns {Promise<{userId: string, email: string, displayName: string, credits: number}|null>}
    */
   getUser: () => ipcRenderer.invoke('auth:getuser'),
+
+  /**
+   * Set local machine display name.
+   * @param {string} displayName
+   * @returns {Promise<{ok: boolean, user: object}>}
+   */
+  setName: (displayName) => ipcRenderer.invoke('auth:set-name', { displayName }),
+
+  /**
+   * Connect to a remote peer directly by IP (e.g. Tailscale or LAN IP).
+   * @param {string} ip
+   * @returns {Promise<{ok: boolean, peer: object|null}>}
+   */
+  addPeerIp: (ip) => ipcRenderer.invoke('cluster:add-peer-ip', { ip }),
 
   // ── Hardware ──────────────────────────────────────────────────────────
   /**
@@ -178,6 +193,7 @@ contextBridge.exposeInMainWorld('c3', {
   installTailscale: () => ipcRenderer.invoke('setup:install-tailscale'),
   openExternal: (url) => ipcRenderer.invoke('system:open-external', url),
   launchDocker: () => ipcRenderer.invoke('system:launch-docker'),
+  getNetworkDebug: () => ipcRenderer.invoke('cluster:network-debug'),
   onSetupProgress: (callback) => {
     const handler = (_event, msg) => callback(msg);
     ipcRenderer.on('setup:install-progress', handler);

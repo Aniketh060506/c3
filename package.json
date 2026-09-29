@@ -7,7 +7,8 @@
     "start": "electron .",
     "dev": "npm run build-ui && electron .",
     "build-ui": "vite build src --config vite.config.js",
-    "build": "npm run build-ui && electron-builder"
+    "build": "npm run build-ui && electron-builder --win",
+    "build:portable": "npm run build-ui && electron-builder --win portable"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity": "^3.600.0",
@@ -16,7 +17,6 @@
     "@aws-sdk/lib-dynamodb": "^3.1141.0",
     "@aws-sdk/util-dynamodb": "^3.600.0",
     "dockerode": "^4.0.2",
-    "electron": "^32.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "simple-peer": "^9.11.1",
@@ -29,6 +29,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
     "cross-env": "^7.0.3",
+    "electron": "^32.0.0",
     "electron-builder": "^24.13.3",
     "postcss": "^8.4.40",
     "tailwindcss": "^3.4.7",
@@ -44,20 +45,43 @@
       "main.js",
       "preload.js",
       "core/**/*",
+      "assets/**/*",
       "aws-config.json",
       "dist-ui/**/*"
     ],
     "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "C3-Standalone.exe"
+    },
+    "nsis": {
+      "artifactName": "C3-Setup.exe",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "C3 Compute Cloud"
     },
     "mac": {
-      "target": "dmg",
-      "icon": "assets/icon.icns"
+      "target": "dmg"
     },
     "linux": {
-      "target": "AppImage",
-      "icon": "assets/icon.png"
+      "target": "AppImage"
     }
   },
   "allowScripts": {

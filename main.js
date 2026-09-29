@@ -3,17 +3,19 @@
 /**
  * main.js — Electron main process for C3 Community Compute Cloud
  *
- * Responsibilities:
- *  - Window lifecycle management
- *  - All IPC handlers (auth, hardware, provider, cluster, credits)
- *  - Background polling loops (heartbeat, request polling)
- *  - Cluster orchestration state machine
- *  - Persisting/restoring session across app restarts
+ * Full Integration:
+ *  - AWS Cognito Authentication (Hosted UI + Direct Credentials)
+ *  - Machine Name Prompt (per account / per machine)
+ *  - DynamoDB Provider Registry, Heartbeat & Session Negotiation
+ *  - P2P LAN & Tailscale Mesh Discovery
+ *  - Real-Time Hardware Telemetry (No Hardcoded Fallbacks)
+ *  - Single-Instance Locking & Frameless Native Titlebar
  */
 
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { v4: uuidv4 } = require('uuid');
 
 const cognito = require('./core/cognito');
@@ -23,20 +25,23 @@ const k3s = require('./core/k3s-cluster');
 const hardware = require('./core/hardware');
 const dispatcher = require('./core/task-dispatcher');
 const setupChecker = require('./core/setup-checker');
+const p2p = require('./core/p2p-coordinator');
 const awsConfig = require('./aws-config.json');
 
-// ── Constants ─────────────────────────────────────────────────────────────
-const isDev = process.env.NODE_ENV === 'development';
+// ── Persistence Paths ──────────────────────────────────────────────────────
 const SESSION_FILE = path.join(app.getPath('userData'), 'c3_session.json');
+const PROFILE_FILE = path.join(app.getPath('userData'), 'c3_node_profile.json');
+const AUTH_URL = 'https://ap-south-11fuiqpnq2.auth.ap-south-1.amazoncognito.com/login?client_id=7frk04l4hn042tssu6rpievuf3&response_type=code&scope=email+openid+phone&redirect_uri=https%3A%2F%2Fd84l1y8p4kdic.cloudfront.net';
+const REDIRECT_PREFIX = 'https://d84l1y8p4kdic.cloudfront.net';
 
-// ── State ─────────────────────────────────────────────────────────────────
 let mainWindow = null;
+let currentSession = null; // Current cluster session
+let providerActive = false;
 let heartbeatInterval = null;
 let requestPollInterval = null;
-let providerActive = false;
-let currentSession = null; // { sessionId, role: 'consumer'|'provider', ... }
+let demoSessionUser = null;
+const pendingJoinRequests = new Map();
 
-// ── Session persistence ────────────────────────────────────────────────────
 function saveSession(data) {
   try {
     fs.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2), 'utf-8');
@@ -50,20 +55,56 @@ function loadSession() {
     if (fs.existsSync(SESSION_FILE)) {
       return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));
     }
-  } catch {
-    // Ignore corrupt sessions
-  }
+  } catch (_) {}
   return null;
 }
 
 function clearSession() {
   try {
     if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
-  } catch {}
-  currentSession = null;
+  } catch (_) {}
+  demoSessionUser = null;
 }
 
-// ── Window ────────────────────────────────────────────────────────────────
+function loadAllProfiles() {
+  try {
+    if (fs.existsSync(PROFILE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PROFILE_FILE, 'utf-8'));
+      if (typeof data === 'object' && data !== null) return data;
+    }
+  } catch (_) {}
+  return {};
+}
+
+function getProfileForEmail(email) {
+  if (!email) return { displayName: '' };
+  const all = loadAllProfiles();
+  const normalized = email.trim().toLowerCase();
+  if (all[normalized] && typeof all[normalized] === 'object') {
+    return all[normalized];
+  }
+  return { displayName: '' };
+}
+
+function saveProfileForEmail(email, data) {
+  try {
+    if (!email) return;
+    const all = loadAllProfiles();
+    const normalized = email.trim().toLowerCase();
+    all[normalized] = { ...(all[normalized] || {}), ...data, email: normalized };
+    fs.writeFileSync(PROFILE_FILE, JSON.stringify(all, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[profile] Failed to save profile:', err.message);
+  }
+}
+
+function loadProfile(email) {
+  const targetEmail = email || cognito.getEmail() || demoSessionUser?.email || loadSession()?.email || '';
+  if (targetEmail) return getProfileForEmail(targetEmail);
+  return { displayName: '' };
+}
+
+// ── Window Management ──────────────────────────────────────────────────────
 function createWindow() {
   Menu.setApplicationMenu(null);
 
@@ -86,7 +127,7 @@ function createWindow() {
       sandbox: false,
     },
     show: true,
-    icon: path.join(__dirname, 'assets', 'icon.png'),
+    ...(fs.existsSync(path.join(__dirname, 'assets', 'icon.png')) ? { icon: path.join(__dirname, 'assets', 'icon.png') } : {}),
   });
 
   mainWindow.removeMenu();
@@ -94,53 +135,114 @@ function createWindow() {
   mainWindow.focus();
 
   const distHtml = path.join(__dirname, 'dist-ui', 'index.html');
-  const AUTH_URL = 'https://ap-south-11fuiqpnq2.auth.ap-south-1.amazoncognito.com/login?client_id=7frk04l4hn042tssu6rpievuf3&response_type=code&scope=email+openid+phone&redirect_uri=https%3A%2F%2Fd84l1y8p4kdic.cloudfront.net';
-  const REDIRECT_PREFIX = 'https://d84l1y8p4kdic.cloudfront.net';
 
-  const saved = loadSession();
-  if (saved?.tokens?.idToken) {
-    cognito.restoreSession(saved.tokens);
-    currentSession = saved;
-    mainWindow.loadFile(distHtml);
-  } else {
-    // Directly launch AWS Cognito Hosted Login UI
-    mainWindow.loadURL(AUTH_URL);
+  // Intercept AWS Cognito OAuth redirect on mainWindow
+  async function handleCognitoRedirect(url) {
+    try {
+      const parsed = new URL(url);
+      const code = parsed.searchParams.get('code');
+      const error = parsed.searchParams.get('error');
+
+      if (error) {
+        console.error('[auth] Cognito redirect error:', error);
+        mainWindow.loadURL(AUTH_URL);
+        return;
+      }
+
+      if (code) {
+        console.log('[auth] Intercepted authorization code from AWS Hosted UI!');
+        const user = await cognito.exchangeCodeForTokens(code);
+        try { await dynamo.createUser(user.userId, user.email); } catch (_) {}
+
+        const profile = getProfileForEmail(user.email);
+        const displayName = profile?.displayName || '';
+
+        const sessionData = {
+          userId: user.userId,
+          email: user.email,
+          tokens: user.tokens,
+          displayName,
+        };
+        saveSession(sessionData);
+
+        p2p.updateProfile({ displayName });
+
+        // Auth succeeded -> Load application UI!
+        mainWindow.loadFile(distHtml);
+      }
+    } catch (err) {
+      console.error('[auth] Failed to process Cognito redirect:', err.message);
+      mainWindow.loadURL(AUTH_URL);
+    }
   }
 
-  // Intercept the CloudFront redirect to capture the auth code automatically
-  let exchangingAuth = false;
-  const handleAuthNavigation = async (url) => {
-    if (url.startsWith(REDIRECT_PREFIX) && !exchangingAuth) {
-      try {
-        const parsed = new URL(url);
-        const code = parsed.searchParams.get('code');
-        if (code) {
-          exchangingAuth = true;
-          console.log('[auth] Intercepted authorization code from AWS Hosted UI!');
-          const user = await cognito.exchangeCodeForTokens(code);
-          try { await dynamo.createUser(user.userId, user.email); } catch (_) {}
-          currentSession = { userId: user.userId, tokens: user.tokens };
-          saveSession(currentSession);
-          console.log('[auth] Login succeeded! Loading C3 dashboard...');
-          mainWindow.loadFile(distHtml);
-        }
-      } catch (err) {
-        exchangingAuth = false;
-        console.error('[auth] Code exchange error:', err.message);
-      }
+  mainWindow.webContents.on('will-redirect', (event, url) => {
+    if (url.startsWith(REDIRECT_PREFIX)) {
+      event.preventDefault();
+      handleCognitoRedirect(url);
     }
-  };
+  });
 
-  mainWindow.webContents.on('will-redirect', (_e, url) => handleAuthNavigation(url));
-  mainWindow.webContents.on('will-navigate', (_e, url) => handleAuthNavigation(url));
-  mainWindow.webContents.on('did-navigate', (_e, url) => handleAuthNavigation(url));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith(REDIRECT_PREFIX)) {
+      event.preventDefault();
+      handleCognitoRedirect(url);
+    }
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    if (validatedURL && validatedURL.includes('amazoncognito.com')) {
+      console.warn(`[auth] Failed to load AWS Cognito (${errorCode}): ${errorDescription}`);
+      mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>AWS Sign In</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #fafafa; color: #1e293b; }
+            .card { background: white; border: 1px solid #e2e8f0; border-radius: 20px; padding: 40px; max-width: 400px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
+            h2 { margin: 0 0 10px 0; font-size: 20px; }
+            p { font-size: 13px; color: #64748b; margin-bottom: 24px; line-height: 1.5; }
+            button { background: #ff9900; color: #0f172a; border: none; border-radius: 12px; font-weight: bold; padding: 12px 24px; font-size: 14px; cursor: pointer; }
+            button:hover { background: #ffaa22; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h2>Connection to AWS Failed</h2>
+            <p>Could not reach Amazon Cognito. Please check your internet connection and try again.</p>
+            <button onclick="window.location.href='${AUTH_URL}'">Retry AWS Sign In</button>
+          </div>
+        </body>
+        </html>
+      `)}`);
+    }
+  });
+
+  // Check if saved session exists and is still valid
+  const saved = loadSession();
+  let hasValidSession = false;
+  if (saved?.tokens?.idToken) {
+    try {
+      cognito.restoreSession(saved.tokens);
+      if (cognito.getUserId()) {
+        hasValidSession = true;
+      }
+    } catch (_) {}
+  }
+
+  if (hasValidSession) {
+    mainWindow.loadFile(distHtml);
+  } else {
+    // Directly give AWS Cognito Hosted UI!
+    mainWindow.loadURL(AUTH_URL);
+  }
 
   mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     console.log(`[Renderer Console] [${level}] ${message} (${sourceId}:${line})`);
   });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
-
   mainWindow.on('maximize', () => pushToRenderer('window:maximized-change', true));
   mainWindow.on('unmaximize', () => pushToRenderer('window:maximized-change', false));
 
@@ -149,36 +251,39 @@ function createWindow() {
   });
 }
 
-// ── Helper: push events to renderer ───────────────────────────────────────
 function pushToRenderer(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
 }
 
-// ── Provider polling helpers ──────────────────────────────────────────────
+// ── Provider Loops (DynamoDB) ──────────────────────────────────────────────
 function startProviderLoop(userId) {
-  if (heartbeatInterval) clearInterval(heartbeatInterval);
-  if (requestPollInterval) clearInterval(requestPollInterval);
+  stopProviderLoop();
 
   // Heartbeat every 60 seconds
   heartbeatInterval = setInterval(async () => {
     try {
       await dynamo.heartbeat(userId);
     } catch (err) {
-      console.error('[heartbeat] Error:', err.message);
+      console.error('[heartbeat] DynamoDB error:', err.message);
     }
   }, 60000);
 
-  // Poll for pending cluster requests every 1.5 seconds for instant invitation alerts
+  // Poll for pending cluster requests every 1.5 seconds
   requestPollInterval = setInterval(async () => {
     try {
       const requests = await dynamo.getPendingClusterRequestsForProvider(userId);
       if (requests && requests.length > 0) {
-        pushToRenderer('cluster:request', requests[0]);
+        for (const req of requests) {
+          if (!pendingJoinRequests.has(req.sessionId)) {
+            pendingJoinRequests.set(req.sessionId, req);
+            pushToRenderer('cluster:request', req);
+          }
+        }
       }
     } catch (err) {
-      console.error('[poll:requests] Error:', err.message);
+      // Quiet poll
     }
   }, 1500);
 }
@@ -188,85 +293,93 @@ function stopProviderLoop() {
   if (requestPollInterval) { clearInterval(requestPollInterval); requestPollInterval = null; }
 }
 
-let demoSessionUser = null;
+// ── IPC: Auth (AWS Cognito & Session) ─────────────────────────────────────
+ipcMain.handle('auth:getuser', async () => {
+  if (demoSessionUser) return demoSessionUser;
 
-// ── IPC: Auth (AWS Hosted UI) ─────────────────────────────────────────────
-ipcMain.handle('auth:open-hosted-login', async () => {
-  return new Promise((resolve, reject) => {
-    const authUrl = 'https://ap-south-11fuiqpnq2.auth.ap-south-1.amazoncognito.com/login?client_id=7frk04l4hn042tssu6rpievuf3&response_type=code&scope=email+openid+phone&redirect_uri=https%3A%2F%2Fd84l1y8p4kdic.cloudfront.net';
+  const saved = loadSession();
+  if (saved?.tokens?.idToken) {
+    try {
+      cognito.restoreSession(saved.tokens);
+    } catch (_) {}
+  }
 
-    const authWin = new BrowserWindow({
-      width: 520,
-      height: 720,
-      parent: mainWindow || undefined,
-      modal: Boolean(mainWindow),
-      autoHideMenuBar: true,
-      title: 'AWS Cognito Sign In',
-      backgroundColor: '#ffffff',
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-      },
-    });
+  const userId = cognito.getUserId();
+  if (!userId) return null; // Triggers AuthScreen in UI
 
-    authWin.loadURL(authUrl);
+  const email = cognito.getEmail() || saved?.email || '';
+  let credits = 100;
+  try {
+    const dbUser = await dynamo.getUser(userId);
+    if (dbUser?.credits !== undefined) credits = dbUser.credits;
+  } catch (_) {}
 
-    let resolved = false;
+  // Look up profile specifically for this email on this device
+  const profile = getProfileForEmail(email);
+  const displayName = profile?.displayName || '';
 
-    const handleNavigation = async (url) => {
-      if (url.startsWith('https://d84l1y8p4kdic.cloudfront.net')) {
-        try {
-          const parsed = new URL(url);
-          const code = parsed.searchParams.get('code');
-          const error = parsed.searchParams.get('error');
-
-          if (error) {
-            resolved = true;
-            authWin.destroy();
-            return reject(new Error(parsed.searchParams.get('error_description') || error));
-          }
-
-          if (code) {
-            resolved = true;
-            authWin.destroy();
-            const user = await cognito.exchangeCodeForTokens(code);
-            try { await dynamo.createUser(user.userId, user.email); } catch (_) {}
-            currentSession = { userId: user.userId, tokens: user.tokens };
-            saveSession(currentSession);
-            resolve(user);
-          }
-        } catch (err) {
-          resolved = true;
-          authWin.destroy();
-          reject(err);
-        }
-      }
-    };
-
-    authWin.webContents.on('will-redirect', (_e, url) => handleNavigation(url));
-    authWin.webContents.on('will-navigate', (_e, url) => handleNavigation(url));
-    authWin.webContents.on('did-navigate', (_e, url) => handleNavigation(url));
-
-    authWin.on('closed', () => {
-      if (!resolved) {
-        reject(new Error('Sign in window was closed'));
-      }
-    });
-  });
+  return {
+    userId,
+    email,
+    displayName,
+    suggestedName: os.hostname() || 'My-Laptop',
+    credits,
+  };
 });
 
-// ── IPC: Auth (Direct / Demo) ─────────────────────────────────────────────
+ipcMain.handle('auth:open-aws-login', async () => {
+  clearSession();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.loadURL(AUTH_URL);
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('auth:open-hosted-login', async () => {
+  clearSession();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.loadURL(AUTH_URL);
+  }
+  return { ok: true };
+});
+
 ipcMain.handle('auth:login', async (_e, { email, password }) => {
   if (email?.toLowerCase().includes('demo') || password?.toLowerCase() === 'demo' || email?.includes('test')) {
-    demoSessionUser = { userId: 'demo-user-1', email: email || 'demo@c3.cloud', credits: 250 };
+    const profile = getProfileForEmail(email || 'demo@c3.cloud');
+    demoSessionUser = {
+      userId: 'demo-user-1',
+      email: email || 'demo@c3.cloud',
+      displayName: profile?.displayName || '',
+      suggestedName: os.hostname() || 'My-Laptop',
+      credits: 250,
+    };
+    saveSession(demoSessionUser);
     return demoSessionUser;
   }
+
   const result = await cognito.login(email, password);
-  // Attempt to create user record if first login (ignores ConditionFailedException)
-  try {
-    await dynamo.createUser(result.userId, result.email);
-  } catch { /* Already exists */ }
-  return result;
+  try { await dynamo.createUser(result.userId, result.email); } catch (_) {}
+
+  const profile = getProfileForEmail(result.email);
+  const displayName = profile?.displayName || '';
+
+  const sessionData = {
+    userId: result.userId,
+    email: result.email,
+    tokens: result.tokens,
+    displayName,
+  };
+  saveSession(sessionData);
+
+  p2p.updateProfile({ displayName });
+
+  return {
+    userId: result.userId,
+    email: result.email,
+    displayName,
+    suggestedName: os.hostname() || 'My-Laptop',
+    credits: 100,
+  };
 });
 
 ipcMain.handle('auth:signup', async (_e, { email, password }) => {
@@ -279,29 +392,59 @@ ipcMain.handle('auth:confirm', async (_e, { email, code }) => {
   return { ok: true };
 });
 
+ipcMain.handle('auth:set-name', async (_e, { displayName }) => {
+  const cleanName = (displayName || '').trim();
+  if (!cleanName) throw new Error('Machine name cannot be blank.');
+
+  const email = cognito.getEmail() || demoSessionUser?.email || loadSession()?.email || '';
+  if (email) {
+    saveProfileForEmail(email, { displayName: cleanName });
+  }
+
+  const session = loadSession() || {};
+  session.displayName = cleanName;
+  saveSession(session);
+
+  p2p.updateProfile({ displayName: cleanName });
+
+  const userId = cognito.getUserId() || demoSessionUser?.userId;
+  if (userId && !demoSessionUser) {
+    try {
+      const specs = await hardware.getHardwareSpecs();
+      await dynamo.registerProvider(userId, {
+        displayName: cleanName,
+        cpuModel: specs.cpuModel,
+        cpuCores: specs.cpuCores,
+        ramGb: specs.ramGb,
+        gpu: specs.gpu,
+        os: specs.os,
+      });
+    } catch (_) {}
+  }
+
+  return {
+    ok: true,
+    user: {
+      userId: session.userId || userId,
+      email: email || session.email || cleanName,
+      displayName: cleanName,
+      credits: 100,
+    },
+  };
+});
+
 ipcMain.handle('auth:signout', async () => {
-  demoSessionUser = null;
   stopProviderLoop();
   providerActive = false;
   clearSession();
   dynamo.resetClient();
   await cognito.signOut().catch(() => {});
+  p2p.setSharing(false);
+  await k3s.stopCluster().catch(() => {});
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(AUTH_URL);
   }
   return { ok: true };
-});
-
-ipcMain.handle('auth:getuser', async () => {
-  if (demoSessionUser) return demoSessionUser;
-  const userId = cognito.getUserId();
-  if (!userId) return null;
-  try {
-    const user = await dynamo.getUser(userId);
-    return { userId, email: cognito.getEmail(), credits: user?.credits ?? 0 };
-  } catch {
-    return { userId, email: cognito.getEmail(), credits: 0 };
-  }
 });
 
 // ── IPC: Hardware ─────────────────────────────────────────────────────────
@@ -309,15 +452,25 @@ ipcMain.handle('hw:specs', async () => {
   return await hardware.getHardwareSpecs();
 });
 
+let _lastLiveStatsResult = null;
+let _liveStatsIpcBusy = false;
 ipcMain.handle('hw:livestats', async () => {
-  return await hardware.getLiveStats();
+  if (_liveStatsIpcBusy) return _lastLiveStatsResult;
+  _liveStatsIpcBusy = true;
+  try {
+    _lastLiveStatsResult = await hardware.getLiveStats();
+    return _lastLiveStatsResult;
+  } finally {
+    _liveStatsIpcBusy = false;
+  }
 });
 
-// ── IPC: Provider ─────────────────────────────────────────────────────────
+// ── IPC: Provider (Sharing Hardware) ──────────────────────────────────────
 ipcMain.handle('provider:register', async (_e, profile) => {
   const userId = cognito.getUserId() || demoSessionUser?.userId;
   if (!userId) throw new Error('Not authenticated');
   if (demoSessionUser) return { ok: true };
+
   await dynamo.registerProvider(userId, profile);
   return { ok: true };
 });
@@ -326,27 +479,134 @@ ipcMain.handle('provider:toggle', async (_e, { active }) => {
   const userId = cognito.getUserId() || demoSessionUser?.userId;
   if (!userId) throw new Error('Not authenticated');
 
+  providerActive = Boolean(active);
+  p2p.setSharing(providerActive);
+
   if (demoSessionUser) {
-    providerActive = active;
     return { ok: true, active: providerActive };
   }
 
-  if (active) {
-    await dynamo.updateProviderStatus(userId, 'ONLINE');
-    await dynamo.heartbeat(userId);
+  if (providerActive) {
+    const session = loadSession() || {};
+    const displayName = session.displayName || getProfileForEmail(session.email)?.displayName || os.hostname() || 'Compute Node';
+
+    // Update p2p with correct userId now that we're authenticated
+    p2p.updateProfile({ displayName });
+
+    // Return immediately — register in background so UI is instant
+    setImmediate(async () => {
+      try {
+        const specs = await hardware.getHardwareSpecs(); // instant — cached
+        await dynamo.registerProvider(userId, {
+          displayName,
+          cpuModel: specs.cpuModel,
+          cpuCores: specs.cpuCores,
+          ramGb: specs.ramGb,
+          gpu: specs.gpu,
+          os: specs.os,
+        });
+        await dynamo.updateProviderStatus(userId, 'ONLINE');
+        await dynamo.heartbeat(userId);
+      } catch (err) {
+        console.warn('[provider:toggle] DynamoDB register note:', err.message);
+      }
+    });
     startProviderLoop(userId);
-    providerActive = true;
   } else {
     stopProviderLoop();
-    await dynamo.updateProviderStatus(userId, 'OFFLINE');
-    providerActive = false;
-    // Instantly remove any running cluster containers
-    await k3s.stopCluster().catch(() => {});
+    dynamo.updateProviderStatus(userId, 'OFFLINE').catch(() => {});
+    k3s.stopCluster().catch(() => {});
   }
+
   return { ok: true, active: providerActive };
 });
 
-// ── IPC: Cluster (Consumer-side) ──────────────────────────────────────────
+// ── IPC: Marketplace (DynamoDB + P2P) ─────────────────────────────────────
+ipcMain.handle('providers:list', async () => {
+  const currentUserId = cognito.getUserId() || demoSessionUser?.userId;
+  const merged = new Map();
+
+  // 1. Fetch from DynamoDB
+  try {
+    const dList = await dynamo.getActiveProviders();
+    if (Array.isArray(dList)) {
+      for (const p of dList) {
+        const isSelf = Boolean(currentUserId && p.userId === currentUserId);
+        merged.set(p.userId, { ...p, isSelf });
+      }
+    }
+  } catch (err) {
+    console.warn('[providers:list] DynamoDB note:', err.message);
+  }
+
+  // 2. Fetch from local P2P coordinator
+  try {
+    const pList = p2p.getAvailableProviders();
+    if (Array.isArray(pList)) {
+      for (const p of pList) {
+        const isSelf = Boolean(currentUserId && p.userId === currentUserId);
+        merged.set(p.userId, { ...(merged.get(p.userId) || {}), ...p, isSelf });
+      }
+    }
+  } catch (_) {}
+
+  // 3. If this machine is actively sharing, ensure it appears in the marketplace
+  if (providerActive && currentUserId) {
+    try {
+      const specs = hardware.getHardwareSpecs ? await hardware.getHardwareSpecs() : {}; // instant — cached
+      const email = cognito.getEmail() || loadSession()?.email || '';
+      const profile = getProfileForEmail(email);
+      const existing = merged.get(currentUserId) || {};
+      merged.set(currentUserId, {
+        userId: currentUserId,
+        displayName: profile?.displayName || existing.displayName || loadSession()?.displayName || os.hostname() || 'This Machine',
+        cpuModel: specs.cpuModel || existing.cpuModel,
+        cpuCores: specs.cpuCores || existing.cpuCores,
+        ramGb: specs.ramGb || existing.ramGb,
+        gpu: specs.gpu || existing.gpu,
+        os: specs.os || existing.os,
+        status: 'ONLINE',
+        isSelf: true,
+      });
+    } catch (_) {}
+  }
+
+  // 4. Deduplicate by displayName — same device can appear from both DynamoDB and P2P
+  //    Prefer entries with real Cognito userIds (not starting with 'device-') over P2P fallback ids
+  const all = Array.from(merged.values());
+  const seenNames = new Map(); // displayName.toLowerCase() -> best entry
+  for (const p of all) {
+    const nameKey = (p.displayName || '').trim().toLowerCase();
+    if (!nameKey || nameKey === 'compute node') {
+      // No name — always include
+      seenNames.set(p.userId, p);
+      continue;
+    }
+    const existing = seenNames.get(nameKey);
+    if (!existing) {
+      seenNames.set(nameKey, p);
+    } else {
+      // Prefer the entry with the real Cognito userId (not a device- fallback)
+      const existingIsReal = !existing.userId.startsWith('device-');
+      const pIsReal = !p.userId.startsWith('device-');
+      if (pIsReal && !existingIsReal) {
+        seenNames.set(nameKey, p);
+      }
+    }
+  }
+
+  return Array.from(seenNames.values());
+});
+
+ipcMain.handle('cluster:add-peer-ip', async (_e, { ip }) => {
+  try {
+    const peer = await p2p.pingPeer(ip);
+    return { ok: Boolean(peer), peer };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle('cluster:pick-folder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Select Workspace Folder',
@@ -356,12 +616,20 @@ ipcMain.handle('cluster:pick-folder', async () => {
   return result.filePaths[0];
 });
 
+// ── IPC: Cluster Orchestration ─────────────────────────────────────────────
 ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
-  const userId = cognito.getUserId();
+  const userId = cognito.getUserId() || demoSessionUser?.userId;
   if (!userId) throw new Error('Not authenticated');
 
   const sessionId = uuidv4();
-  const clusterToken = uuidv4().replace(/-/g, '') + uuidv4().replace(/-/g, '');
+  const clusterToken = uuidv4().replace(/-/g, '');
+
+  pushToRenderer('cluster:status', { status: 'NEGOTIATING', sessionId });
+  pushToRenderer('cluster:log', `[c3] Starting cluster session ${sessionId}...`);
+
+  const net = await tailscale.getConnectableIp();
+  const masterIp = net.ip;
+  pushToRenderer('cluster:log', `[c3] Master network endpoint: ${net.type.toUpperCase()} (${masterIp})`);
 
   let tailscaleAuthKey = '';
   try {
@@ -371,229 +639,280 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
     tailscaleAuthKey = awsConfig.tailscaleAuthKey || '';
   }
 
-  await dynamo.createClusterSession({
-    sessionId,
-    consumerId: userId,
-    providerIds,
-    k3sToken: clusterToken,
-    tailscaleAuthKey,
-  });
-
-  pushToRenderer('cluster:status', { status: 'NEGOTIATING', sessionId });
-  pushToRenderer('cluster:log', `[c3] Session ${sessionId} created. Waiting for providers...`);
-
-  // Poll until all providers ACCEPTED (or timeout 5 minutes)
-  const deadline = Date.now() + 5 * 60 * 1000;
-  let allAccepted = false;
-
-  const pollAcceptance = setInterval(async () => {
-    if (Date.now() > deadline) {
-      clearInterval(pollAcceptance);
-      await dynamo.setClusterStatus(sessionId, 'TIMEOUT');
-      pushToRenderer('cluster:status', { status: 'TIMEOUT', sessionId });
-      pushToRenderer('cluster:log', '[c3] Timeout: not all providers accepted.');
-      return;
-    }
-
+  // Register in DynamoDB
+  if (!demoSessionUser) {
     try {
-      const session = await dynamo.getSession(sessionId);
-      if (!session) return;
-
-      const statuses = Object.values(session.providersStatus || {});
-      if (statuses.some((s) => s === 'DECLINED')) {
-        clearInterval(pollAcceptance);
-        pushToRenderer('cluster:status', { status: 'DECLINED', sessionId });
-        pushToRenderer('cluster:log', '[c3] A provider declined the request.');
-        return;
-      }
-
-      if (statuses.every((s) => s === 'ACCEPTED')) {
-        clearInterval(pollAcceptance);
-        allAccepted = true;
-        pushToRenderer('cluster:log', '[c3] All providers accepted. Bootstrapping cluster...');
-        pushToRenderer('cluster:status', { status: 'BOOTSTRAPPING', sessionId });
-        bootstrapMasterNode(sessionId, clusterToken, workspacePath);
-      }
-    } catch (err) {
-      console.error('[poll:acceptance]', err.message);
+      await dynamo.createClusterSession({
+        sessionId,
+        consumerId: userId,
+        providerIds,
+        k3sToken: clusterToken,
+        tailscaleAuthKey,
+      });
+    } catch (e) {
+      console.warn('[dynamo] createClusterSession note:', e.message);
     }
-  }, 1200);
+  }
 
+  pushToRenderer('cluster:log', '[c3] Bootstrapping K3s master control plane in Docker...');
+  await k3s.startMasterNode({
+    meshIp: masterIp,
+    clusterToken,
+    localWorkspacePath: workspacePath,
+  });
+  pushToRenderer('cluster:log', '✓ K3s master control plane active and accepting worker nodes.');
+  k3s.exportHostKubeconfig().catch(() => {});
+
+  // ── Auto-start a local worker node on this same machine ───────────────────
+  // This makes the consumer machine contribute its own CPU/RAM as a K3s worker.
+  // The worker joins via 127.0.0.1 (same host) so no Tailscale needed for self-join.
+  pushToRenderer('cluster:log', '[c3] Joining self as local compute worker node...');
+  try {
+    const specsForWorker = await hardware.getHardwareSpecs(); // instant — cached
+    const hasNvidiaGpu = specsForWorker.gpuVendor === 'NVIDIA';
+    await k3s.startWorkerNode({
+      masterMeshIp: '127.0.0.1', // same machine — use loopback
+      clusterToken,
+      gpuEnabled: hasNvidiaGpu,
+      localWorkspacePath: workspacePath,
+    });
+    pushToRenderer('cluster:log', '✓ Local worker node joined — this machine contributes both control plane and compute resources.');
+  } catch (workerErr) {
+    // Non-fatal — cluster still works with just the master
+    pushToRenderer('cluster:log', `[c3] Note: Self-worker join: ${workerErr.message} — cluster continues with master node only.`);
+    console.warn('[k3s] Self-worker start note:', workerErr.message);
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  if (!demoSessionUser) {
+    try {
+      await dynamo.setClusterMasterMeshIp(sessionId, masterIp);
+      await dynamo.setClusterStatus(sessionId, 'ACTIVE');
+    } catch (_) {}
+  }
+
+  // Also broadcast join request via P2P coordinator to local peers
+  const p2pNodes = p2p.getAvailableProviders().filter(p => providerIds.includes(p.userId));
+  if (p2pNodes.length === 0) {
+    pushToRenderer('cluster:log', `[c3] Note: No P2P-discovered providers matching selected IDs — using DynamoDB session only.`);
+  }
+  for (const prov of p2pNodes) {
+    pushToRenderer('cluster:log', `[c3] Sending join invitation to provider "${prov.displayName}" at ${prov.ip}:${prov.port || 44344}...`);
+    p2p.requestJoinCluster({
+      providerId: prov.userId,
+      providerIp: prov.ip,
+      providerPort: prov.port || 44344,
+      sessionId,
+      workspacePath,
+      masterIp,        // ← now forwarded correctly
+      clusterToken,    // ← now forwarded correctly
+    }).then(() => {
+      pushToRenderer('cluster:log', `✓ Provider "${prov.displayName}" accepted the cluster invitation.`);
+    }).catch((err) => {
+      pushToRenderer('cluster:log', `✗ Provider "${prov.displayName}" join failed: ${err.message}`);
+    });
+  }
+
+  currentSession = {
+    sessionId,
+    role: 'consumer',
+    workspacePath,
+    masterIp,
+    clusterToken,
+    providerIds,
+    tailscaleIp: masterIp,
+  };
+  saveSession(currentSession);
+
+  pushToRenderer('cluster:status', { status: 'ACTIVE', sessionId, workspacePath, providerIds, tailscaleIp: masterIp });
   return { sessionId };
 });
 
-async function bootstrapMasterNode(sessionId, clusterToken, workspacePath) {
-  try {
-    pushToRenderer('cluster:log', '[c3] Discovering cluster network interface...');
-    if (awsConfig.tailscaleAuthKey && !awsConfig.tailscaleAuthKey.includes('PLACEHOLDER')) {
-      try {
-        pushToRenderer('cluster:log', '[c3] Connecting to Tailscale mesh fabric...');
-        await tailscale.joinMesh(awsConfig.tailscaleAuthKey, 'c3-consumer');
-      } catch (tsErr) {
-        console.warn('[tailscale] Mesh join note:', tsErr.message);
-      }
-    }
-    const net = await tailscale.getConnectableIp();
-    const meshIp = net.ip;
-    pushToRenderer('cluster:log', `[c3] Network mode: ${net.type.toUpperCase()} (Endpoint: ${meshIp})`);
-
-    pushToRenderer('cluster:log', '[c3] Starting K3s master control plane in Docker...');
-    await k3s.startMasterNode({ meshIp, clusterToken, localWorkspacePath: workspacePath });
-    pushToRenderer('cluster:log', '[c3] K3s master is running and accepting worker nodes.');
-
-    await dynamo.setClusterMasterMeshIp(sessionId, meshIp);
-    await dynamo.setClusterStatus(sessionId, 'ACTIVE');
-
-    const session = await dynamo.getSession(sessionId);
-    currentSession = { ...session, role: 'consumer', workspacePath };
-    saveSession(currentSession);
-
-    pushToRenderer('cluster:status', { status: 'ACTIVE', sessionId, meshIp, session: currentSession });
-    pushToRenderer('cluster:log', '[c3] Cluster is ACTIVE and ready.');
-  } catch (err) {
-    pushToRenderer('cluster:log', `[c3] Bootstrap error: ${err.message}`);
-    pushToRenderer('cluster:status', { status: 'ERROR', error: err.message });
-    await dynamo.setClusterStatus(sessionId, 'ERROR').catch(() => {});
-  }
-}
-
-// ── IPC: Cluster (Provider-side) ──────────────────────────────────────────
 ipcMain.handle('cluster:accept', async (_e, { sessionId }) => {
-  const userId = cognito.getUserId();
+  const userId = cognito.getUserId() || demoSessionUser?.userId;
   if (!userId) throw new Error('Not authenticated');
 
-  await dynamo.acceptClusterRequest(sessionId, userId);
-  pushToRenderer('cluster:log', `[c3] Accepted session ${sessionId}. Waiting for master IP...`);
+  let req = pendingJoinRequests.get(sessionId);
 
-  // Poll for consumerMeshIp
-  const deadline = Date.now() + 5 * 60 * 1000;
-  const pollMeshIp = setInterval(async () => {
-    if (Date.now() > deadline) {
-      clearInterval(pollMeshIp);
-      pushToRenderer('cluster:log', '[c3] Timeout waiting for master IP.');
-      return;
-    }
+  if (!demoSessionUser) {
     try {
-      const session = await dynamo.getSession(sessionId);
-      if (session?.consumerMeshIp) {
-        clearInterval(pollMeshIp);
-        pushToRenderer('cluster:log', `[c3] Got master IP: ${session.consumerMeshIp}. Starting worker...`);
-
-        // Automatically join Tailscale mesh if Host provided a valid auth key
-        if (session.tailscaleAuthKey && session.tailscaleAuthKey.startsWith('tskey-auth-')) {
-          try {
-            pushToRenderer('cluster:log', '[c3] Joining Tailscale mesh with session auth key...');
-            await tailscale.joinMesh(session.tailscaleAuthKey, `c3-worker-${userId.slice(0, 8)}`);
-            pushToRenderer('cluster:log', '[c3] Joined Tailscale mesh successfully.');
-          } catch (tsErr) {
-            console.warn('[tailscale] Worker mesh join note:', tsErr.message);
-            pushToRenderer('cluster:log', `[tailscale] Mesh note: ${tsErr.message}`);
-          }
-        }
-
-        await k3s.startWorkerNode({
-          masterMeshIp: session.consumerMeshIp,
-          clusterToken: session.k3sToken,
-          gpuEnabled: false,
-        });
-        currentSession = { ...session, role: 'provider' };
-        saveSession(currentSession);
-        pushToRenderer('cluster:status', { status: 'WORKER_ACTIVE', sessionId });
-        pushToRenderer('cluster:log', '[c3] Worker node is active and connected to cluster.');
-      }
-    } catch (err) {
-      console.error('[poll:meshIp]', err.message);
+      await dynamo.acceptClusterRequest(sessionId, userId);
+    } catch (e) {
+      console.warn('[dynamo] acceptClusterRequest note:', e.message);
     }
-  }, 1500);
+  }
 
+  // Retrieve masterIp and token from request or DynamoDB session
+  let masterAddress = req?.masterIp || req?.consumerMeshIp || req?.consumerIp;
+  let token = req?.clusterToken || req?.k3sToken;
+  let providerWorkspace = req?.workspacePath || null;
+
+  if (!masterAddress || !token) {
+    pushToRenderer('cluster:log', `[c3] Fetching session credentials from DynamoDB for session ${sessionId}...`);
+    // Poll up to 10 seconds for consumerMeshIp to be populated in DynamoDB
+    for (let i = 0; i < 10; i++) {
+      try {
+        const dSession = await dynamo.getSession(sessionId);
+        if (dSession) {
+          masterAddress = masterAddress || dSession.consumerMeshIp;
+          token = token || dSession.k3sToken;
+          if (masterAddress && token) break;
+        }
+      } catch (_) {}
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  if (masterAddress && token) {
+    pushToRenderer('cluster:log', `[c3] Connecting to master at ${masterAddress} with cluster token...`);
+    try {
+      await k3s.startWorkerNode({
+        masterMeshIp: masterAddress,
+        clusterToken: token,
+        gpuEnabled: false,
+        localWorkspacePath: providerWorkspace,
+      });
+      pushToRenderer('cluster:log', `✓ Connected to master cluster! Worker node is now active.`);
+    } catch (err) {
+      pushToRenderer('cluster:log', `✗ Failed to connect to master at ${masterAddress}: ${err.message}`);
+      throw err;
+    }
+
+    if (req?.consumerIp) {
+      p2p.replyJoinRequest({
+        consumerIp: req.consumerIp,
+        consumerPort: 44344,
+        sessionId,
+        accepted: true,
+      }).catch(() => {});
+    }
+
+    pendingJoinRequests.delete(sessionId);
+  } else {
+    const errMsg = `Could not resolve master IP address or token for session ${sessionId}.`;
+    pushToRenderer('cluster:log', `[c3] Error: ${errMsg}`);
+    throw new Error(errMsg);
+  }
+
+  pushToRenderer('cluster:status', { status: 'WORKER_ACTIVE', sessionId });
   return { ok: true };
 });
 
 ipcMain.handle('cluster:decline', async (_e, { sessionId }) => {
-  const userId = cognito.getUserId();
+  const userId = cognito.getUserId() || demoSessionUser?.userId;
   if (!userId) throw new Error('Not authenticated');
-  await dynamo.declineClusterRequest(sessionId, userId);
+
+  if (!demoSessionUser) {
+    try { await dynamo.declineClusterRequest(sessionId, userId); } catch (_) {}
+  }
+
+  const req = pendingJoinRequests.get(sessionId);
+  if (req) {
+    await p2p.replyJoinRequest({
+      consumerIp: req.consumerIp,
+      consumerPort: 44344,
+      sessionId,
+      accepted: false,
+    });
+    pendingJoinRequests.delete(sessionId);
+  }
+
   return { ok: true };
-});
-
-ipcMain.handle('cluster:telemetry', async () => {
-  return await dispatcher.getAggregatedTelemetry();
-});
-
-ipcMain.handle('cluster:dispatch', async (_e, { target, command }) => {
-  const logs = [];
-  await dispatcher.dispatchWorkload({
-    target,
-    command,
-    onLog: (line) => {
-      logs.push(line);
-      pushToRenderer('cluster:log', line);
-    },
-  });
-  return { ok: true, logs };
 });
 
 ipcMain.handle('cluster:stop', async () => {
-  try {
-    await k3s.stopCluster();
-    if (currentSession?.sessionId) {
-      await dynamo.setClusterStatus(currentSession.sessionId, 'STOPPED').catch(() => {});
-    }
-  } catch (err) {
-    console.error('[cluster:stop]', err.message);
-  }
+  await k3s.stopCluster().catch(() => {});
   clearSession();
-  pushToRenderer('cluster:status', { status: 'STOPPED' });
+  pushToRenderer('cluster:log', '[c3] Cluster session ended.');
   return { ok: true };
 });
 
-ipcMain.handle('settings:get-tailscale-key', async () => {
+let _lastTelemetryResult = null;
+let _telemetryIpcBusy = false;
+ipcMain.handle('cluster:telemetry', async () => {
+  if (_telemetryIpcBusy) return _lastTelemetryResult; // already running — return cached
+  _telemetryIpcBusy = true;
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'aws-config.json'), 'utf8'));
-    return cfg.tailscaleAuthKey || '';
-  } catch {
-    return awsConfig.tailscaleAuthKey || '';
+    _lastTelemetryResult = await dispatcher.getAggregatedTelemetry();
+    return _lastTelemetryResult;
+  } finally {
+    _telemetryIpcBusy = false;
   }
 });
 
-ipcMain.handle('settings:save-tailscale-key', async (_e, key) => {
-  try {
-    const cfgPath = path.join(__dirname, 'aws-config.json');
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-    cfg.tailscaleAuthKey = (key || '').trim();
-    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
-    awsConfig.tailscaleAuthKey = cfg.tailscaleAuthKey;
-    if (cfg.tailscaleAuthKey.startsWith('tskey-auth-')) {
-      await tailscale.joinMesh(cfg.tailscaleAuthKey, 'c3-host').catch(() => {});
+ipcMain.handle('cluster:dispatch', async (_e, { target, command }) => {
+  return await dispatcher.dispatchWorkload({ target, command, onLog: line => pushToRenderer('cluster:log', line) });
+});
+
+ipcMain.handle('cluster:network-debug', async () => {
+  const { exec } = require('child_process');
+  const { promisify } = require('util');
+  const execAsync = promisify(exec);
+
+  const run = async (cmd, timeoutMs = 3000) => {
+    try {
+      const { stdout } = await execAsync(cmd, { timeout: timeoutMs });
+      return stdout.trim();
+    } catch (e) {
+      return null;
     }
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
+  };
 
-// ── IPC: Credits ──────────────────────────────────────────────────────────
-ipcMain.handle('credits:get', async () => {
-  if (demoSessionUser) return { credits: demoSessionUser.credits || 250 };
-  const userId = cognito.getUserId();
-  if (!userId) return { credits: 0 };
+  // 1. Tailscale status
+  let tailscaleStatus = { connected: false, ip: null, peers: [] };
   try {
-    const user = await dynamo.getUser(userId);
-    return { credits: user?.credits ?? 0 };
-  } catch {
-    return { credits: 0 };
-  }
-});
+    const tsStatus = await tailscale.getStatus();
+    if (tsStatus) {
+      const selfIp = Object.values(tsStatus.Self?.TailscaleIPs || {})[0] || null;
+      const peers = Object.values(tsStatus.Peer || {}).map(p => ({
+        name: p.HostName || p.DNSName?.split('.')[0] || 'peer',
+        ip: p.TailscaleIPs?.[0] || null,
+        online: Boolean(p.Online),
+        relay: p.Relay || 'direct',
+      }));
+      tailscaleStatus = { connected: true, ip: selfIp, peers };
+    }
+  } catch (_) {}
 
-// ── Providers marketplace ─────────────────────────────────────────────────
-ipcMain.handle('providers:list', async () => {
+  // 2. JuiceFS mount check (inside c3-k3s-master container)
+  let juicefs = { mounted: false, mountPoint: '/workspace', usage: null, backend: null };
   try {
-    const list = await dynamo.getActiveProviders();
-    return Array.isArray(list) ? list : [];
-  } catch (err) {
-    console.error('[providers:list] DynamoDB error:', err.message);
-    return [];
-  }
+    const mountOut = await run('docker exec c3-k3s-master sh -c "df -h /workspace 2>/dev/null && mount | grep -i juicefs 2>/dev/null || echo NOT_MOUNTED"', 5000);
+    if (mountOut && !mountOut.includes('NOT_MOUNTED')) {
+      const dfLine = mountOut.split('\n').find(l => l.includes('/workspace'));
+      const parts = dfLine?.trim().split(/\s+/) || [];
+      juicefs = {
+        mounted: true,
+        mountPoint: '/workspace',
+        usage: parts.length >= 5 ? { size: parts[1], used: parts[2], avail: parts[3], percent: parts[4] } : null,
+        backend: mountOut.includes('juicefs') ? 'JuiceFS' : 'HostPath',
+      };
+    }
+  } catch (_) {}
+
+  // 3. Docker containers (C3-related only)
+  let containers = [];
+  try {
+    const ctOut = await run('docker ps --filter "name=c3" --format "{{.Names}}|{{.Status}}|{{.Image}}"', 3000);
+    if (ctOut) {
+      containers = ctOut.split('\n').filter(Boolean).map(line => {
+        const [name, status, image] = line.split('|');
+        return { name, status, image, ok: status?.startsWith('Up') };
+      });
+    }
+  } catch (_) {}
+
+  // 4. K3s API server health (inside container)
+  let k3sApi = { reachable: false, nodeCount: 0 };
+  try {
+    const nodeOut = await run('docker exec c3-k3s-master kubectl get nodes --no-headers 2>/dev/null', 5000);
+    if (nodeOut) {
+      const nodeLines = nodeOut.split('\n').filter(Boolean);
+      k3sApi = { reachable: true, nodeCount: nodeLines.length, nodes: nodeLines.map(l => l.trim().split(/\s+/)[0]) };
+    }
+  } catch (_) {}
+
+  return { tailscale: tailscaleStatus, juicefs, containers, k3sApi, ts: Date.now() };
 });
 
 // ── IPC: Setup Checker & System ──────────────────────────────────────────
@@ -665,7 +984,7 @@ ipcMain.handle('window:is-maximized', () => {
   return mainWindow && !mainWindow.isDestroyed() ? mainWindow.isMaximized() : false;
 });
 
-// ── App lifecycle with single-instance lock ──────────────────────────────
+// ── App Lifecycle ──────────────────────────────────────────────────────────
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!gotSingleInstanceLock) {
@@ -682,12 +1001,38 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     createWindow();
 
-    // Restore session tokens if saved
-    const saved = loadSession();
-    if (saved?.tokens) {
-      cognito.restoreSession(saved.tokens);
-      currentSession = saved;
-    }
+    // Warm up hardware specs in background (cache for later calls)
+    hardware.getHardwareSpecs().catch(() => {});
+
+    // Start P2P coordinator non-blocking after app opens
+    setImmediate(async () => {
+      try {
+        const saved = loadSession();
+        const profile = saved?.email ? getProfileForEmail(saved.email) : loadProfile();
+        // Use real userId from session (not 'local-node') so dedup works correctly
+        const userId = cognito.getUserId() || saved?.userId || `device-${require('os').hostname()}`;
+        const displayName = profile?.displayName || saved?.displayName || os.hostname() || 'Compute Node';
+
+        await p2p.start({ userId, displayName, specs: {} });
+
+        // Load specs and update p2p profile (non-blocking)
+        hardware.getHardwareSpecs().then(specs => {
+          p2p.updateProfile({ specs });
+        }).catch(() => {});
+
+        p2p.onRequestReceived = (req) => {
+          pendingJoinRequests.set(req.sessionId, req);
+          pushToRenderer('cluster:request', {
+            sessionId: req.sessionId,
+            consumerId: req.consumerId,
+            consumerEmail: req.consumerName || req.consumerId,
+            workspacePath: req.workspacePath,
+          });
+        };
+      } catch (e) {
+        console.warn('[P2P] Startup note:', e.message);
+      }
+    });
   });
 }
 
@@ -701,4 +1046,5 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   stopProviderLoop();
+  p2p.stop();
 });

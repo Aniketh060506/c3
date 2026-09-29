@@ -62,15 +62,21 @@ export default function ProviderTab({ user, active, setActive }) {
   }, []);
 
   useEffect(() => {
+    if (!active) {
+      setLiveStats(null);
+      if (statsInterval.current) { clearInterval(statsInterval.current); statsInterval.current = null; }
+      return;
+    }
     const poll = () => {
-      if (window.c3?.getLiveStats) {
-        window.c3.getLiveStats().then(setLiveStats).catch(() => {});
-      }
+      if (document.hidden) return; // don't poll when window is minimized
+      if (window.c3?.getLiveStats) window.c3.getLiveStats().then(setLiveStats).catch(() => {});
     };
     poll();
-    statsInterval.current = setInterval(poll, 2000);
-    return () => clearInterval(statsInterval.current);
-  }, []);
+    statsInterval.current = setInterval(poll, 5000);
+    return () => {
+      if (statsInterval.current) { clearInterval(statsInterval.current); statsInterval.current = null; }
+    };
+  }, [active]);
 
   useEffect(() => {
     if (!window.c3?.onClusterRequest) return;
@@ -127,13 +133,35 @@ export default function ProviderTab({ user, active, setActive }) {
         <button
           onClick={toggleProvider}
           disabled={toggling}
-          className={`px-8 py-3.5 rounded-2xl text-base font-black transition shadow-sm ${
+          className={`inline-flex items-center gap-2.5 px-8 py-3.5 rounded-2xl text-base font-black transition-colors shadow-sm select-none ${
             active
               ? 'bg-red-50 border border-red-200 text-red-600 hover:bg-red-100'
-              : 'bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-emerald-500/20'
-          }`}
+              : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/20'
+          } disabled:opacity-60 disabled:cursor-not-allowed`}
         >
-          {toggling ? '...' : active ? '⏹ Stop Sharing' : '▶ Start Sharing'}
+          {toggling ? (
+            <>
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              {active ? 'Stopping...' : 'Starting...'}
+            </>
+          ) : active ? (
+            <>
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <rect x="4" y="4" width="12" height="12" rx="2"/>
+              </svg>
+              Stop Sharing
+            </>
+          ) : (
+            <>
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/>
+              </svg>
+              Start Sharing
+            </>
+          )}
         </button>
       </div>
 
@@ -200,7 +228,7 @@ export default function ProviderTab({ user, active, setActive }) {
                 <div className="text-xs text-slate-500 mt-0.5">Physical hardware detected directly from your host system</div>
               </div>
               <span className="text-[11px] font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
-                ⚡ RTX 5050 &amp; DDR5 Verified
+                ⚡ {specs.gpuModel && specs.gpuModel !== 'None' ? `${specs.gpuModel.split('(')[0].trim()} Verified` : 'Hardware Telemetry Active'}
               </span>
             </div>
 
@@ -208,26 +236,26 @@ export default function ProviderTab({ user, active, setActive }) {
               <SpecCard
                 icon="⚙️"
                 title="Processor"
-                value={specs.cpuCores ? `${specs.cpuCores} Cores` : '16 Cores'}
-                sub={specs.cpuModel || 'AMD Ryzen 9'}
+                value={specs.cpuCores ? `${specs.cpuCores} Cores` : 'Detected'}
+                sub={specs.cpuModel || 'CPU'}
               />
               <SpecCard
                 icon="🧠"
                 title="Memory (RAM)"
-                value={`${specs.ramGb || 16} GB ${specs.ramType || 'DDR5'}`}
-                sub={`${specs.ramSpeed || '5200 MHz'} · ${specs.ramManufacturer || 'Micron'} (${specs.ramUsableGb || 15.2} GB Usable)`}
+                value={`${specs.ramGb || specs.ramUsableGb || '—'} GB${specs.ramType ? ` ${specs.ramType}` : ''}`}
+                sub={[specs.ramSpeed, specs.ramManufacturer, specs.ramUsableGb ? `(${specs.ramUsableGb} GB Usable)` : ''].filter(Boolean).join(' · ') || 'System Memory'}
               />
               <SpecCard
                 icon="🎮"
                 title="Dedicated GPU"
-                value="RTX 5050 (8GB)"
-                sub={specs.gpu || 'NVIDIA GeForce RTX 5050 Laptop GPU (8GB VRAM)'}
+                value={specs.gpuModel && specs.gpuModel !== 'None' ? (specs.gpuVramGb ? `${specs.gpuModel.split('(')[0].trim()} (${specs.gpuVramGb}GB)` : specs.gpuModel) : 'None'}
+                sub={specs.gpu && specs.gpu !== 'None' ? specs.gpu : 'No dedicated GPU detected'}
               />
               <SpecCard
                 icon="💻"
                 title="Operating System"
-                value={specs.os ? specs.os.split(' ').slice(0, 2).join(' ') : 'Windows 11'}
-                sub={specs.os || 'Windows 11 64-bit'}
+                value={specs.os ? specs.os.split(' ').slice(0, 2).join(' ') : 'OS'}
+                sub={specs.os || 'Host Operating System'}
               />
             </div>
 
@@ -239,61 +267,71 @@ export default function ProviderTab({ user, active, setActive }) {
                   <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
                     <span>🧠</span> Detailed RAM Architecture
                   </div>
-                  <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                    {specs.ramType || 'DDR5'} HIGH-SPEED
-                  </span>
+                  {specs.ramType && (
+                    <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                      {specs.ramType} {specs.ramSpeed ? `@ ${specs.ramSpeed}` : 'INSTALLED'}
+                    </span>
+                  )}
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                   <div className="bg-white p-2 rounded-lg border border-slate-200/60">
                     <span className="text-slate-400 block text-[10px]">TOTAL INSTALLED</span>
-                    <span className="font-bold text-slate-800">{specs.ramGb || 16} GB Physical</span>
+                    <span className="font-bold text-slate-800">{specs.ramGb || specs.ramUsableGb || '—'} GB Physical</span>
                   </div>
                   <div className="bg-white p-2 rounded-lg border border-slate-200/60">
                     <span className="text-slate-400 block text-[10px]">CLOCK SPEED</span>
-                    <span className="font-bold text-slate-800">{specs.ramSpeed || '5200 MHz'}</span>
+                    <span className="font-bold text-slate-800">{specs.ramSpeed || 'Standard'}</span>
                   </div>
                   <div className="bg-white p-2 rounded-lg border border-slate-200/60">
                     <span className="text-slate-400 block text-[10px]">MANUFACTURER</span>
-                    <span className="font-bold text-slate-800">{specs.ramManufacturer || 'Micron Technology'}</span>
+                    <span className="font-bold text-slate-800">{specs.ramManufacturer || 'OEM / System'}</span>
                   </div>
                   <div className="bg-white p-2 rounded-lg border border-slate-200/60">
                     <span className="text-slate-400 block text-[10px]">FORM FACTOR</span>
-                    <span className="font-bold text-slate-800">{specs.ramFormFactor || 'SODIMM'} (Slot B)</span>
+                    <span className="font-bold text-slate-800">{specs.ramFormFactor || 'DIMM'}</span>
                   </div>
                 </div>
               </div>
 
               {/* Detailed GPU */}
-              <div className="bg-slate-50/80 border border-slate-200/80 rounded-xl p-4 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                    <span>🎮</span> NVIDIA GeForce RTX 5050 Details
-                  </div>
-                  <span className="text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">
-                    CUDA &amp; TENSOR READY
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                  <div className="bg-white p-2 rounded-lg border border-slate-200/60">
-                    <span className="text-slate-400 block text-[10px]">DISCRETE GPU</span>
-                    <span className="font-bold text-slate-800 truncate block" title={specs.gpuModel || 'RTX 5050'}>
-                      {specs.gpuModel || 'GeForce RTX 5050'}
+              {specs.gpuModel && specs.gpuModel !== 'None' ? (
+                <div className="bg-slate-50/80 border border-slate-200/80 rounded-xl p-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5 truncate max-w-[200px]" title={specs.gpuModel}>
+                      <span>🎮</span> {specs.gpuModel.split('(')[0].trim()}
+                    </div>
+                    <span className="text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">
+                      {specs.gpuVendor?.toUpperCase() || 'GPU'} ACCELERATED
                     </span>
                   </div>
-                  <div className="bg-white p-2 rounded-lg border border-slate-200/60">
-                    <span className="text-slate-400 block text-[10px]">DEDICATED VRAM</span>
-                    <span className="font-bold text-indigo-700">{specs.gpuVramGb || 8} GB GDDR6</span>
-                  </div>
-                  <div className="bg-white p-2 rounded-lg border border-slate-200/60">
-                    <span className="text-slate-400 block text-[10px]">DRIVER VERSION</span>
-                    <span className="font-bold text-slate-800">{specs.gpuDriver || '610.88'}</span>
-                  </div>
-                  <div className="bg-white p-2 rounded-lg border border-slate-200/60">
-                    <span className="text-slate-400 block text-[10px]">HARDWARE ACCELERATION</span>
-                    <span className="font-bold text-emerald-700">CUDA / AI Cores</span>
+                  <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                    <div className="bg-white p-2 rounded-lg border border-slate-200/60">
+                      <span className="text-slate-400 block text-[10px]">DISCRETE GPU</span>
+                      <span className="font-bold text-slate-800 truncate block" title={specs.gpuModel}>
+                        {specs.gpuModel.split('(')[0].trim()}
+                      </span>
+                    </div>
+                    <div className="bg-white p-2 rounded-lg border border-slate-200/60">
+                      <span className="text-slate-400 block text-[10px]">DEDICATED VRAM</span>
+                      <span className="font-bold text-indigo-700">{specs.gpuVramGb ? `${specs.gpuVramGb} GB` : 'Shared / Dynamic'}</span>
+                    </div>
+                    <div className="bg-white p-2 rounded-lg border border-slate-200/60">
+                      <span className="text-slate-400 block text-[10px]">DRIVER VERSION</span>
+                      <span className="font-bold text-slate-800">{specs.gpuDriver || 'Installed'}</span>
+                    </div>
+                    <div className="bg-white p-2 rounded-lg border border-slate-200/60">
+                      <span className="text-slate-400 block text-[10px]">ACCELERATION</span>
+                      <span className="font-bold text-emerald-700">{specs.gpuVendor?.toLowerCase().includes('nvidia') ? 'CUDA / Tensor' : 'Hardware Compute'}</span>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="bg-slate-50/80 border border-slate-200/80 rounded-xl p-4 flex flex-col justify-center items-center text-center">
+                  <span className="text-xl mb-1">⚙️</span>
+                  <div className="text-xs font-bold text-slate-800">Integrated / Host Compute Only</div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Workloads will utilize multi-threaded host CPU cores</p>
+                </div>
+              )}
             </div>
           </div>
         ) : (
@@ -322,27 +360,29 @@ export default function ProviderTab({ user, active, setActive }) {
             </div>
             <div className="space-y-4">
               <ProgressBar
-                label={`CPU Utilization — ${specs?.cpuModel || 'AMD Ryzen 9'}`}
+                label={`CPU Utilization — ${specs?.cpuModel || 'Host CPU'}`}
                 percent={liveStats.cpuPercent}
                 color="blue"
               />
               <ProgressBar
-                label={`System RAM (DDR5) — ${liveStats.memUsedGb?.toFixed(1) || '13.9'} / ${liveStats.memTotalGb?.toFixed(1) || '15.2'} GB (${liveStats.memFreeGb?.toFixed(1) || '1.3'} GB Free)`}
+                label={`System RAM${specs?.ramType ? ` (${specs.ramType})` : ''} — ${liveStats.memUsedGb?.toFixed(1) || '0'} / ${liveStats.memTotalGb?.toFixed(1) || '0'} GB (${liveStats.memFreeGb?.toFixed(1) || '0'} GB Free)`}
                 percent={liveStats.memPercent}
                 color="amber"
               />
               {liveStats.gpu && (
                 <>
                   <ProgressBar
-                    label={`NVIDIA RTX 5050 Core Load (${liveStats.gpu.temp || 55}°C · ${liveStats.gpu.powerDraw || 13.6}W)`}
+                    label={`${liveStats.gpu.name || 'GPU'} Core Load${liveStats.gpu.temp ? ` (${liveStats.gpu.temp}°C` : ''}${liveStats.gpu.powerDraw ? ` · ${liveStats.gpu.powerDraw}W)` : liveStats.gpu.temp ? ')' : ''}`}
                     percent={liveStats.gpu.gpuPercent}
                     color="indigo"
                   />
-                  <ProgressBar
-                    label={`Dedicated VRAM — ${liveStats.gpu.memUsedGb?.toFixed(2) || '0.24'} / ${liveStats.gpu.memTotalGb?.toFixed(1) || '8.0'} GB GDDR6 (${liveStats.gpu.memUsedMb || 241} MB In Use)`}
-                    percent={liveStats.gpu.memPercent}
-                    color="emerald"
-                  />
+                  {liveStats.gpu.memTotalGb > 0 && (
+                    <ProgressBar
+                      label={`Dedicated VRAM — ${liveStats.gpu.memUsedGb?.toFixed(2) || '0'} / ${liveStats.gpu.memTotalGb?.toFixed(1) || '0'} GB${liveStats.gpu.memUsedMb ? ` (${liveStats.gpu.memUsedMb} MB In Use)` : ''}`}
+                      percent={liveStats.gpu.memPercent}
+                      color="emerald"
+                    />
+                  )}
                 </>
               )}
             </div>

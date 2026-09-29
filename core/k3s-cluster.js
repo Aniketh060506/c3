@@ -175,7 +175,7 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath }) {
  * @param {{masterMeshIp: string, clusterToken: string, gpuEnabled?: boolean}} opts
  * @returns {Promise<{containerId: string}>}
  */
-async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false }) {
+async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false, localWorkspacePath }) {
   await ensureImage(K3S_IMAGE);
   await removeContainerIfExists(WORKER_CONTAINER_NAME);
 
@@ -185,10 +185,22 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false 
     ? [{ Driver: 'nvidia', Count: -1, Capabilities: [['gpu']] }]
     : [];
 
+  // Use a fixed node name so it shows clearly in kubectl get nodes
+  const nodeName = 'c3-self-worker';
+
+  const binds = ['/lib/modules:/lib/modules:ro'];
+  if (localWorkspacePath) {
+    binds.push(`${localWorkspacePath}:/workspace:rw`);
+  }
+
   const container = await docker.createContainer({
     name: WORKER_CONTAINER_NAME,
     Image: K3S_IMAGE,
-    Cmd: ['agent', '--server=https://' + masterMeshIp + ':' + K3S_API_PORT],
+    Cmd: [
+      'agent',
+      '--server=https://' + masterMeshIp + ':' + K3S_API_PORT,
+      '--node-name=' + nodeName,
+    ],
     Env: [
       'K3S_URL=https://' + masterMeshIp + ':' + K3S_API_PORT,
       'K3S_TOKEN=' + clusterToken,
@@ -196,7 +208,7 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false 
     HostConfig: {
       Privileged: true,
       NetworkMode: 'host',
-      Binds: ['/lib/modules:/lib/modules:ro'],
+      Binds: binds,
       RestartPolicy: { Name: 'unless-stopped' },
       ...(gpuEnabled ? { DeviceRequests: deviceRequests } : {}),
     },
@@ -278,9 +290,46 @@ async function getClusterNodes(forceRefresh = false) {
   return _nodesPendingPromise;
 }
 
+async function exportHostKubeconfig() {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const docker = getDocker();
+    const container = docker.getContainer(MASTER_CONTAINER_NAME);
+    const exec = await container.exec({
+      Cmd: ['cat', '/etc/rancher/k3s/k3s.yaml'],
+      AttachStdout: true,
+      AttachStderr: true,
+    });
+    const stream = await exec.start({ hijack: true, stdin: false });
+    const raw = await new Promise((resolve, reject) => {
+      let buf = '';
+      stream.on('data', chunk => (buf += chunk.toString('utf8')));
+      stream.on('end', () => resolve(buf));
+      stream.on('error', reject);
+      setTimeout(() => resolve(buf), 5000);
+    });
+    if (!raw.includes('clusters:')) return false;
+
+    const cleaned = raw.replace(/https:\/\/(0\.0\.0\.0|127\.0\.0\.1):6443/g, 'https://127.0.0.1:6443');
+    const kubeDir = path.join(os.homedir(), '.kube');
+    if (!fs.existsSync(kubeDir)) {
+      fs.mkdirSync(kubeDir, { recursive: true });
+    }
+    const c3Path = path.join(kubeDir, 'c3-config.yaml');
+    fs.writeFileSync(c3Path, cleaned, 'utf8');
+    return true;
+  } catch (e) {
+    console.warn('[k3s] exportHostKubeconfig note:', e.message);
+    return false;
+  }
+}
+
 module.exports = {
   startMasterNode,
   startWorkerNode,
   stopCluster,
   getClusterNodes,
+  exportHostKubeconfig,
 };

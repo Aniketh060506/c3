@@ -4,29 +4,45 @@ import React, { useState, useEffect } from 'react';
  * SetupBanner — Compact, sleek system diagnostics bar.
  * Small footprint: tells you at a glance what is present and what to install.
  * Expandable for full architectural details.
+ * Caches check results per session — shell commands run ONCE only.
  */
+
+// Module-level cache — survives tab switches, only re-runs on explicit re-check
+let _cachedChecks = undefined;
+let _checkPromise = null;
+
 export default function SetupBanner() {
-  const [checks, setChecks] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [checks, setChecks] = useState(_cachedChecks ?? null);
+  const [loading, setLoading] = useState(_cachedChecks === undefined);
   const [expanded, setExpanded] = useState(false);
   const [pulling, setPulling] = useState(false);
   const [installingTs, setInstallingTs] = useState(false);
   const [msg, setMsg] = useState('');
 
-  const runChecks = async () => {
+  const runChecks = async (forceRefresh = false) => {
+    if (!forceRefresh && _cachedChecks !== undefined) {
+      setChecks(_cachedChecks);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    // Deduplicate concurrent calls
+    if (!_checkPromise) {
+      _checkPromise = (window.c3?.checkSetup ? window.c3.checkSetup() : Promise.resolve(null))
+        .catch(() => null)
+        .finally(() => { _checkPromise = null; });
+    }
     try {
-      const result = window.c3?.checkSetup ? await window.c3.checkSetup() : null;
+      const result = await _checkPromise;
+      _cachedChecks = result;
       setChecks(result);
-    } catch {
-      setChecks(null);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    runChecks();
+    runChecks(false); // Use cache if available
     if (window.c3?.onK3sPullProgress) window.c3.onK3sPullProgress(m => setMsg(m));
     if (window.c3?.onSetupProgress) window.c3.onSetupProgress(m => setMsg(m));
   }, []);
@@ -194,7 +210,7 @@ export default function SetupBanner() {
           </button>
 
           <button
-            onClick={runChecks}
+            onClick={() => runChecks(true)}
             className="text-slate-400 hover:text-slate-700 transition font-bold"
             title="Re-check components"
           >

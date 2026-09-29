@@ -27,8 +27,13 @@ function NodeCard({ node, selected, onToggle }) {
             )}
           </div>
           <div>
-            <div className="font-black text-slate-900 text-lg leading-tight">
-              {node.displayName || 'Compute Node'}
+            <div className="font-black text-slate-900 text-lg leading-tight flex items-center gap-2">
+              <span>{node.displayName || 'Compute Node'}</span>
+              {node.isSelf && (
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-blue-100 text-blue-700 uppercase tracking-wider">
+                  This Machine
+                </span>
+              )}
             </div>
             <div className="text-xs text-slate-500 mt-1 font-mono">
               ID: {node.userId ? `${node.userId.slice(0, 18)}...` : 'online'}
@@ -56,10 +61,10 @@ function NodeCard({ node, selected, onToggle }) {
         <div className="bg-slate-50 border border-slate-100 rounded-xl p-3.5">
           <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Memory (RAM)</div>
           <div className="text-base font-black text-slate-900 leading-tight">
-            {node.ramGb ? `${node.ramGb} GB ${node.ramType || 'DDR5'}` : '16 GB DDR5'}
+            {node.ramGb ? `${node.ramGb} GB${node.ramType ? ` ${node.ramType}` : ''}` : '—'}
           </div>
-          <div className="text-[11px] text-slate-500 mt-1">
-            {node.ramSpeed || '5200 MHz'} · {node.ramManufacturer || 'High-Speed RAM'}
+          <div className="text-[11px] text-slate-500 mt-1 truncate">
+            {[node.ramSpeed, node.ramManufacturer].filter(Boolean).join(' · ') || 'System Memory'}
           </div>
         </div>
 
@@ -68,7 +73,7 @@ function NodeCard({ node, selected, onToggle }) {
           <div className={`text-base font-black leading-tight truncate ${
             hasGpu ? 'text-indigo-700' : 'text-slate-400'
           }`}>
-            {hasGpu ? (node.gpu?.includes('5050') ? 'RTX 5050 (8GB)' : 'GPU Ready') : 'CPU only'}
+            {hasGpu ? (node.gpuModel ? node.gpuModel.split('(')[0].trim() : 'Discrete GPU') : 'CPU only'}
           </div>
           <div className="text-[11px] text-slate-500 mt-1 truncate" title={hasGpu ? node.gpu : 'No dedicated GPU'}>
             {hasGpu ? node.gpu : 'None'}
@@ -88,8 +93,10 @@ export default function ConsumerTab({ user, onSwitchToProvider }) {
   const [statusType, setStatusType] = useState('info');
   const [loading, setLoading] = useState(false);
   const [activeSession, setActiveSession] = useState(null);
+  const [peerIp, setPeerIp] = useState('');
+  const [connectingPeer, setConnectingPeer] = useState(false);
 
-  // Load real active providers from DynamoDB (fast 2s polling, no spinner flicker on background ticks)
+  // Load real active providers from P2P coordinator (fast 2s polling)
   const loadProviders = async (isManual = false) => {
     if (isManual) setLoading(true);
     try {
@@ -106,9 +113,36 @@ export default function ConsumerTab({ user, onSwitchToProvider }) {
     }
   };
 
+  const connectPeer = async () => {
+    const ip = peerIp.trim();
+    if (!ip) return;
+    setConnectingPeer(true);
+    setStatusMsg(`Pinging remote node at ${ip}...`);
+    setStatusType('info');
+    try {
+      if (window.c3?.addPeerIp) {
+        const res = await window.c3.addPeerIp(ip);
+        if (res.ok && res.peer) {
+          setStatusMsg(`✓ Connected to "${res.peer.displayName}" (${ip})!`);
+          setStatusType('info');
+          setPeerIp('');
+          loadProviders(true);
+        } else {
+          setStatusMsg(`Node at ${ip} responded, but Provider sharing is not active on that machine.`);
+          setStatusType('error');
+        }
+      }
+    } catch (err) {
+      setStatusMsg(`Could not connect to node at ${ip}: ${err.message}`);
+      setStatusType('error');
+    } finally {
+      setConnectingPeer(false);
+    }
+  };
+
   useEffect(() => {
     loadProviders(true);
-    const interval = setInterval(() => loadProviders(false), 2000);
+    const interval = setInterval(() => loadProviders(false), 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -358,6 +392,26 @@ export default function ConsumerTab({ user, onSwitchToProvider }) {
               </div>
             </div>
 
+            {/* Direct Connect by IP Bar */}
+            <div className="flex items-center gap-3 bg-white p-3.5 rounded-2xl border border-slate-200/90 shadow-sm">
+              <span className="text-base pl-1">🌐</span>
+              <input
+                type="text"
+                value={peerIp}
+                onChange={e => setPeerIp(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') connectPeer(); }}
+                placeholder="Connect node by Tailscale or LAN IP (e.g. 100.73.113.54 or 192.168.1.15)..."
+                className="flex-1 text-xs font-mono text-slate-800 placeholder-slate-400 outline-none bg-transparent"
+              />
+              <button
+                onClick={connectPeer}
+                disabled={connectingPeer || !peerIp.trim()}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 active:bg-black text-white rounded-xl text-xs font-bold transition disabled:opacity-40 whitespace-nowrap"
+              >
+                {connectingPeer ? 'Pinging...' : '+ Connect Node'}
+              </button>
+            </div>
+
             {/* Zero Fake Data — Honest Real State */}
             {providers.length === 0 ? (
               <div className="bg-white border-2 border-dashed border-slate-200/90 rounded-3xl p-16 text-center shadow-sm flex flex-col items-center justify-center">
@@ -366,32 +420,32 @@ export default function ConsumerTab({ user, onSwitchToProvider }) {
                 </div>
                 <h3 className="text-xl font-black text-slate-800">No External Provider Nodes Online</h3>
                 <p className="text-sm text-slate-500 mt-2 max-w-md mx-auto leading-relaxed">
-                  There are currently no other computers sharing their hardware in this region.
+                  There are currently no other computers sharing their hardware on your local network or Tailscale mesh.
                 </p>
 
                 <div className="mt-6 bg-slate-50 border border-slate-200 rounded-2xl p-6 text-left max-w-lg w-full space-y-2.5 text-xs text-slate-600">
                   <div className="font-bold text-slate-800 mb-1">To connect a second laptop or desktop:</div>
                   <div className="flex items-start gap-2">
                     <span className="font-bold text-blue-600">1.</span>
-                    <span>Install or run C3 on the second computer.</span>
+                    <span>Install or run C3 on the second computer and enter its machine name (e.g. "Laptop-2").</span>
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="font-bold text-blue-600">2.</span>
-                    <span>Sign in with your C3 account.</span>
+                    <span>On that laptop, switch to the <strong>Provider tab</strong> and click <strong>"▶ Start Sharing"</strong>.</span>
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="font-bold text-blue-600">3.</span>
-                    <span>Go to the <strong>Provider tab</strong> and click <strong>"▶ Start Sharing"</strong>.</span>
+                    <span>If both laptops are on the same Wi-Fi, it will appear here automatically via P2P LAN broadcast!</span>
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="font-bold text-blue-600">4.</span>
-                    <span>That laptop will automatically appear here with its real CPU, RAM, and GPU specs!</span>
+                    <span>If on different Wi-Fi networks, sign into Tailscale on both laptops or type its Tailscale IP into the connect bar above.</span>
                   </div>
                 </div>
 
                 <div className="mt-8 flex gap-3">
                   <button
-                    onClick={loadProviders}
+                    onClick={() => loadProviders(true)}
                     className="px-6 py-3 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-bold rounded-xl shadow-sm transition"
                   >
                     ↻ Check Again
