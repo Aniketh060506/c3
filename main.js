@@ -637,7 +637,7 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   if (!userId) throw new Error('Not authenticated');
 
   const sessionId = uuidv4();
-  const clusterToken = uuidv4().replace(/-/g, '');
+  let clusterToken = uuidv4().replace(/-/g, '');
 
   pushToRenderer('cluster:status', { status: 'NEGOTIATING', sessionId });
   pushToRenderer('cluster:log', `[c3] Starting cluster session ${sessionId}...`);
