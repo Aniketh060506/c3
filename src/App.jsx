@@ -14,6 +14,8 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('c3_provider_active') || 'false'); }
     catch { return false; }
   });
+  // Issue 4: subscribe at App level so requests aren't lost when on Consumer tab
+  const [incomingRequest, setIncomingRequest] = useState(null);
 
   useEffect(() => {
     if (window.c3?.getUser) {
@@ -21,9 +23,7 @@ export default function App() {
         .then(u => {
           if (u && (u.userId || u.email)) {
             setUser(u);
-            if (!u.displayName) {
-              setShowNameModal(true);
-            }
+            if (!u.displayName) setShowNameModal(true);
           } else {
             setUser(null);
           }
@@ -33,6 +33,13 @@ export default function App() {
     } else {
       setBooting(false);
     }
+  }, []);
+
+  // Issue 4: global cluster request subscription — never misses a request
+  useEffect(() => {
+    if (!window.c3?.onClusterRequest) return;
+    const unsub = window.c3.onClusterRequest(req => setIncomingRequest(req));
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
 
   const handleLogin = (authenticatedUser) => {
@@ -169,7 +176,13 @@ export default function App() {
           <ConsumerTab user={user} />
         </div>
         <div className={`w-full h-full overflow-y-auto ${activeTab === 'provider' ? '' : 'hidden'}`}>
-          <ProviderTab user={user} active={providerActive} setActive={setProviderActiveAndPersist} />
+          <ProviderTab
+            user={user}
+            active={providerActive}
+            setActive={setProviderActiveAndPersist}
+            incomingRequest={incomingRequest}
+            onRequestHandled={() => setIncomingRequest(null)}
+          />
         </div>
       </main>
     </div>

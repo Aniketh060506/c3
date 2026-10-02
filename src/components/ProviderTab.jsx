@@ -43,12 +43,12 @@ function SpecCard({ icon, title, value, sub }) {
 }
 
 // ── Provider Tab ───────────────────────────────────────────────────────────────
-export default function ProviderTab({ user, active, setActive }) {
+// Issue 4: incomingRequest and onRequestHandled are lifted to App.jsx
+export default function ProviderTab({ user, active, setActive, incomingRequest, onRequestHandled }) {
   const [specs, setSpecs] = useState(null);
   const [liveStats, setLiveStats] = useState(null);
   const [sessionActive, setSessionActive] = useState(false);
   const [sessionId, setSessionId] = useState(null);
-  const [incomingRequest, setIncomingRequest] = useState(null);
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState('');
   const statsInterval = useRef(null);
@@ -78,10 +78,17 @@ export default function ProviderTab({ user, active, setActive }) {
     };
   }, [active]);
 
+  // Issue 4: on mount, if active is already true (persisted from last session),
+  // re-call toggleProvider so the main process starts the P2P sharing loop.
+  const hasSyncedActive = useRef(false);
   useEffect(() => {
-    if (!window.c3?.onClusterRequest) return;
-    window.c3.onClusterRequest(req => setIncomingRequest(req));
-  }, []);
+    if (active && !hasSyncedActive.current && window.c3?.toggleProvider) {
+      hasSyncedActive.current = true;
+      window.c3.toggleProvider(true).catch(() => {});
+    }
+  }, [active]);
+
+  // NOTE: onClusterRequest is now handled in App.jsx (Issue 4)
 
   const toggleProvider = async () => {
     setToggling(true); setError('');
@@ -106,7 +113,7 @@ export default function ProviderTab({ user, active, setActive }) {
       if (window.c3?.acceptClusterRequest) await window.c3.acceptClusterRequest(incomingRequest.sessionId);
       setSessionId(incomingRequest.sessionId);
       setSessionActive(true);
-      setIncomingRequest(null);
+      if (onRequestHandled) onRequestHandled();
     } catch (e) { setError(e.message); }
   };
 
@@ -115,7 +122,7 @@ export default function ProviderTab({ user, active, setActive }) {
     try {
       if (window.c3?.declineClusterRequest) await window.c3.declineClusterRequest(incomingRequest.sessionId);
     } catch (_) {}
-    setIncomingRequest(null);
+    if (onRequestHandled) onRequestHandled();
   };
 
   return (

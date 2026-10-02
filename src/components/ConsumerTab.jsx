@@ -5,22 +5,26 @@ import SetupBanner from './SetupBanner';
 // ── Node Card — Spacious, full-bleed design ────────────────────────────────────
 function NodeCard({ node, selected, onToggle }) {
   const hasGpu = node.gpu && node.gpu !== 'None' && node.gpu !== 'undefined';
+  const disabled = node.canInvite === false; // Issue 1: provider hasn't signed in
   return (
     <div
-      onClick={onToggle}
-      className={`bg-white border-2 rounded-2xl p-6 cursor-pointer transition-all duration-150 select-none shadow-sm ${
-        selected
-          ? 'border-blue-600 shadow-xl shadow-blue-500/10 ring-2 ring-blue-500/20 bg-blue-50/20'
-          : 'border-slate-200/90 hover:border-slate-300 hover:shadow-md'
+      onClick={disabled ? undefined : onToggle}
+      title={disabled ? 'Provider must sign in to receive invitations' : undefined}
+      className={`bg-white border-2 rounded-2xl p-6 transition-all duration-150 select-none shadow-sm ${
+        disabled
+          ? 'border-slate-100 opacity-50 cursor-not-allowed'
+          : selected
+            ? 'border-blue-600 shadow-xl shadow-blue-500/10 ring-2 ring-blue-500/20 bg-blue-50/20 cursor-pointer'
+            : 'border-slate-200/90 hover:border-slate-300 hover:shadow-md cursor-pointer'
       }`}
     >
       {/* Top row */}
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-start gap-3.5">
           <div className={`mt-0.5 w-5 h-5 rounded-md border-2 flex items-center justify-center flex-shrink-0 transition ${
-            selected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'
+            disabled ? 'border-slate-200 bg-slate-50' : selected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'
           }`}>
-            {selected && (
+            {selected && !disabled && (
               <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 14 14">
                 <polyline points="2,7 6,11 12,3" />
               </svg>
@@ -32,6 +36,11 @@ function NodeCard({ node, selected, onToggle }) {
               {node.isSelf && (
                 <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-blue-100 text-blue-700 uppercase tracking-wider">
                   This Machine
+                </span>
+              )}
+              {disabled && (
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-amber-100 text-amber-700 uppercase tracking-wider">
+                  Not Signed In
                 </span>
               )}
             </div>
@@ -102,7 +111,11 @@ export default function ConsumerTab({ user, onSwitchToProvider }) {
     try {
       if (window.c3?.getProviders) {
         const list = await window.c3.getProviders();
-        setProviders(Array.isArray(list) ? list : []);
+        const arr = Array.isArray(list) ? list : [];
+        setProviders(arr);
+        // Issue 1: prune selected to only ids that are still present AND canInvite
+        const validIds = new Set(arr.filter(p => p.canInvite !== false).map(p => p.userId));
+        setSelected(prev => prev.filter(id => validIds.has(id)));
       } else {
         setProviders([]);
       }
@@ -168,9 +181,12 @@ export default function ConsumerTab({ user, onSwitchToProvider }) {
     });
   }, [workspacePath]);
 
-  const toggleNode = id => setSelected(prev =>
-    prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-  );
+  const toggleNode = id => {
+    // Issue 1: never select a canInvite:false node
+    const node = providers.find(p => p.userId === id);
+    if (node && node.canInvite === false) return;
+    setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
 
   const pickFolder = async () => {
     if (window.c3?.selectWorkspaceFolder) {

@@ -256,7 +256,7 @@ function createWindow() {
         };
         saveAuth(authData);
 
-        p2p.updateProfile({ displayName });
+        p2p.updateProfile({ userId: user.userId, displayName });
 
         // Auth succeeded -> Load application UI!
         mainWindow.loadFile(distHtml);
@@ -318,7 +318,8 @@ function createWindow() {
     (async () => {
       try {
         cognito.restoreSession(saved.tokens);
-        if (cognito.getUserId()) {
+        const restoredUserId = cognito.getUserId();
+        if (restoredUserId) {
           // Section C: check if idToken is already expired
           const tokenPayload = saved.tokens.idToken.split('.')[1];
           const decoded = JSON.parse(Buffer.from(tokenPayload, 'base64url').toString('utf-8'));
@@ -328,7 +329,6 @@ function createWindow() {
             console.log('[auth] Saved idToken expired — attempting refresh on startup...');
             try {
               await cognito.refreshTokens();
-              // Persist fresh tokens
               const freshCreds = cognito.getCredentials();
               saveAuth({ ...saved, tokens: freshCreds });
               hasValidSession = true;
@@ -338,6 +338,11 @@ function createWindow() {
             }
           } else {
             hasValidSession = true;
+          }
+          // Issue 1: update p2p identity with real Cognito userId on startup
+          if (hasValidSession) {
+            const savedDisplayName = saved.displayName || getProfileForEmail(saved.email)?.displayName || '';
+            p2p.updateProfile({ userId: restoredUserId, displayName: savedDisplayName });
           }
         }
       } catch (_) {}
@@ -489,7 +494,8 @@ ipcMain.handle('auth:login', async (_e, { email, password }) => {
   };
   saveAuth(authData);
 
-  p2p.updateProfile({ displayName });
+  // Issue 1: push real Cognito userId into p2p so providers see one entry
+  p2p.updateProfile({ userId: result.userId, displayName });
 
   return {
     userId: result.userId,
@@ -614,8 +620,8 @@ ipcMain.handle('provider:toggle', async (_e, { active }) => {
     const saved = loadAuth() || {};
     const displayName = saved.displayName || getProfileForEmail(saved.email)?.displayName || os.hostname() || 'Compute Node';
 
-    // Update p2p with correct userId now that we're authenticated
-    p2p.updateProfile({ displayName });
+    // Issue 1: always push real Cognito userId into p2p on toggle
+    p2p.updateProfile({ userId, displayName });
 
     // Return immediately — register in background so UI is instant
     setImmediate(async () => {
@@ -697,14 +703,15 @@ ipcMain.handle('providers:list', async () => {
     } catch (_) {}
   }
 
-  // 4. Deduplicate by displayName — same device can appear from both DynamoDB and P2P
-  //    Prefer entries with real Cognito userIds (not starting with 'device-') over P2P fallback ids
+  // 4. Deduplicate by displayName — same device can appear from both DynamoDB and P2P.
+  //    Issue 1: Prefer entries with real Cognito userIds (not starting with 'device-').
+  //    A lone device- entry is still returned but tagged canInvite:false.
   const all = Array.from(merged.values());
   const seenNames = new Map(); // displayName.toLowerCase() -> best entry
   for (const p of all) {
     const nameKey = (p.displayName || '').trim().toLowerCase();
     if (!nameKey || nameKey === 'compute node') {
-      // No name — always include
+      // No stable name — include as-is
       seenNames.set(p.userId, p);
       continue;
     }
@@ -712,16 +719,20 @@ ipcMain.handle('providers:list', async () => {
     if (!existing) {
       seenNames.set(nameKey, p);
     } else {
-      // Prefer the entry with the real Cognito userId (not a device- fallback)
       const existingIsReal = !existing.userId.startsWith('device-');
       const pIsReal = !p.userId.startsWith('device-');
       if (pIsReal && !existingIsReal) {
-        seenNames.set(nameKey, p);
+        seenNames.set(nameKey, p); // replace device- with real Cognito entry
       }
+      // else keep existing real entry, discard device- duplicate
     }
   }
 
-  return Array.from(seenNames.values());
+  // Tag device- only entries as canInvite:false
+  return Array.from(seenNames.values()).map(p => ({
+    ...p,
+    canInvite: !p.userId.startsWith('device-'),
+  }));
 });
 
 ipcMain.handle('cluster:add-peer-ip', async (_e, { ip }) => {
@@ -747,6 +758,12 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   const userId = cognito.getUserId() || demoSessionUser?.userId;
   if (!userId) throw new Error('Not authenticated');
 
+  // Issue 1: reject any device- provider — they haven't signed in yet
+  const badIds = (providerIds || []).filter(id => id.startsWith('device-'));
+  if (badIds.length > 0) {
+    throw new Error('Selected provider is not signed in. Refresh and select again.');
+  }
+
   const sessionId = uuidv4();
   let clusterToken = uuidv4().replace(/-/g, '');
 
@@ -754,14 +771,19 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   pushToRenderer('cluster:log', `[c3] Starting cluster session ${sessionId}...`);
 
   const net = await tailscale.getConnectableIp();
-  const masterIp = net.ip;
-  pushToRenderer('cluster:log', `[c3] Master network endpoint: ${net.type.toUpperCase()} (${masterIp})`);
+  const hostIp = net.ip;   // consumer's local/Tailscale IP for workspace sync
 
   // Section A7: read tailscale key from settings first, then awsConfig fallback
   const settings = loadSettings();
-  let tailscaleAuthKey = settings.tailscaleAuthKey || awsConfig.tailscaleAuthKey || '';
+  const tailscaleAuthKey = settings.tailscaleAuthKey || awsConfig.tailscaleAuthKey || '';
 
-  // Register in DynamoDB
+  // Issue 3: multi-provider requires a valid Tailscale auth key
+  if (providerIds && providerIds.length > 0 && !tailscaleAuthKey.startsWith('tskey-')) {
+    throw new Error('Tailscale auth key required for multi-machine clusters. Add it in Settings.');
+  }
+
+  // Issue 2: Register session in DynamoDB FIRST (before master boots)
+  // Providers poll DynamoDB for consumerMeshIp; we fill it after master is Ready
   if (!demoSessionUser) {
     try {
       await dynamo.createClusterSession({
@@ -770,86 +792,30 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
         providerIds,
         k3sToken: clusterToken,
         tailscaleAuthKey,
-        consumerMeshIp: masterIp,
-        // Section F: also persist the host IP for workspace sync on provider side
-        consumerHostIp: masterIp,
+        consumerMeshIp: '',          // filled in after master is Ready
+        consumerHostIp: hostIp,     // Section F: workspace sync IP
       });
     } catch (e) {
       console.warn('[dynamo] createClusterSession note:', e.message);
     }
   }
 
-  pushToRenderer('cluster:log', '[c3] Bootstrapping K3s master control plane in Docker...');
-  let masterRes;
-  try {
-    masterRes = await k3s.startMasterNode({
-      meshIp: masterIp,
-      clusterToken,
-      localWorkspacePath: workspacePath,
-    });
-    if (masterRes?.clusterToken) {
-      clusterToken = masterRes.clusterToken;
-    }
-  } catch (mErr) {
-    throw mErr;
-  }
-  pushToRenderer('cluster:log', '✓ K3s master control plane active and accepting worker nodes.');
-  k3s.exportHostKubeconfig().catch(() => {});
-
-  // ── Deploy default pods ASYNC — do NOT block ACTIVE status ───────────────
-  // python:3.10-slim needs to pull (~150MB) + pod needs to start.
-  // This takes 1-5 min. We push ACTIVE immediately so the terminal opens.
-  // The pod watchdog (startPodWatchdog) will redeploy if not Running.
-  k3s.deployDefaultPods().then(() => {
-    pushToRenderer('cluster:log', '✓ Workload runner pod (c3-worker-runner) is Running. /workspace is mounted.');
-  }).catch(err => {
-    pushToRenderer('cluster:log', `[c3] Pod deploy note: ${err.message} — watchdog will retry.`);
-  });
-
-  // ── Compute Worker Node ──────────────────────────────────────────────────
-  // If external provider is selected, consumer is purely the Master Control Plane.
-  // Only start local worker if no external providers are selected (solo mode).
-  if (!providerIds || providerIds.length === 0) {
-    pushToRenderer('cluster:log', '[c3] Solo mode: joining self as local compute worker node...');
-    try {
-      const specsForWorker = await hardware.getHardwareSpecs();
-      const hasNvidiaGpu = specsForWorker.gpuVendor === 'NVIDIA';
-      await k3s.startWorkerNode({
-        masterMeshIp: '127.0.0.1',
-        clusterToken,
-        gpuEnabled: hasNvidiaGpu,
-        localWorkspacePath: workspacePath,
-        nodeName: 'c3-worker-local',
-      });
-      pushToRenderer('cluster:log', '✓ Local worker node joined.');
-    } catch (workerErr) {
-      console.warn('[k3s] Self-worker start note:', workerErr.message);
-    }
-  } else {
-    pushToRenderer('cluster:log', `[c3] Master Control Plane active. Awaiting connection from ${providerIds.length} provider worker node(s)...`);
-  }
-
-  if (!demoSessionUser) {
-    try {
-      await dynamo.setClusterMasterMeshIp(sessionId, masterIp, clusterToken);
-      await dynamo.setClusterStatus(sessionId, 'ACTIVE');
-    } catch (_) {}
-  }
-
-  // Also broadcast join request via P2P coordinator to local peers
-  const p2pNodes = p2p.getAvailableProviders().filter(p => providerIds.includes(p.userId));
-  if (p2pNodes.length === 0) {
-    pushToRenderer('cluster:log', `[c3] Note: No P2P-discovered providers matching selected IDs — using DynamoDB session only.`);
+  // Issue 2: Send P2P invitations IMMEDIATELY — before master boots
+  // Providers will poll DynamoDB for consumerMeshIp until it appears
+  const p2pNodes = p2p.getAvailableProviders().filter(p => (providerIds || []).includes(p.userId));
+  if (providerIds && providerIds.length > 0 && p2pNodes.length === 0) {
+    pushToRenderer('cluster:log', '[c3] No P2P-discovered providers online — invitation sent via DynamoDB only.');
   }
   for (const prov of p2pNodes) {
     pushToRenderer('cluster:log', `[c3] Sending join invitation to provider "${prov.displayName}" at ${prov.ip}:${prov.port || 44344}...`);
+    // Don't await — provider accept runs concurrently with master boot
     p2p.requestJoinCluster({
       providerId: prov.userId,
       providerIp: prov.ip,
       providerPort: prov.port || 44344,
       sessionId,
       workspacePath,
-      masterIp,
+      masterIp: hostIp,   // placeholder — provider will poll DynamoDB for real masterIp
       clusterToken,
     }).then(() => {
       pushToRenderer('cluster:log', `✓ Provider "${prov.displayName}" accepted the cluster invitation.`);
@@ -859,6 +825,60 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   }
 
   p2p.setActiveWorkspace(workspacePath);
+
+  // Now boot the master (takes 60-120 s)
+  pushToRenderer('cluster:log', '[c3] Bootstrapping K3s master control plane in Docker...');
+  let masterRes;
+  try {
+    masterRes = await k3s.startMasterNode({
+      meshIp: hostIp,
+      clusterToken,
+      localWorkspacePath: workspacePath,
+      tailscaleAuthKey,   // Issue 3: pass key so sidecar starts
+    });
+    if (masterRes?.clusterToken) clusterToken = masterRes.clusterToken;
+  } catch (mErr) {
+    throw mErr;
+  }
+
+  // Issue 3: use masterRes.masterIp (Tailscale 100.x) as the authoritative master address
+  const masterIp = masterRes.masterIp || hostIp;
+  pushToRenderer('cluster:log', `✓ K3s master control plane active at ${masterIp}.`);
+  k3s.exportHostKubeconfig().catch(() => {});
+
+  // Issue 3: now update DynamoDB with real masterIp and token so providers can connect
+  if (!demoSessionUser) {
+    try {
+      await dynamo.setClusterMasterMeshIp(sessionId, masterIp, clusterToken);
+      await dynamo.setClusterStatus(sessionId, 'ACTIVE');
+    } catch (_) {}
+  }
+
+  // Deploy default runner DaemonSet async — watchdog will retry if needed
+  k3s.deployDefaultPods().then(() => {
+    pushToRenderer('cluster:log', '✓ c3-runner DaemonSet is Ready. /workspace is mounted.');
+  }).catch(err => {
+    pushToRenderer('cluster:log', `[c3] Pod deploy note: ${err.message} — watchdog will retry.`);
+  });
+
+  // Issue 3: wait for each provider worker node to become Ready (3 min timeout each)
+  if (providerIds && providerIds.length > 0) {
+    pushToRenderer('cluster:log', `[c3] Awaiting ${providerIds.length} provider worker node(s) to join...`);
+    // Find all p2p nodes selected; wait for their worker node name in k3s
+    for (const prov of p2pNodes) {
+      const workerNodeName = `c3-worker-${(prov.displayName || prov.userId).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40)}`;
+      const docker = require('dockerode');
+      const masterContainer = new docker(
+        process.platform === 'win32' ? { socketPath: '//./pipe/docker_engine' } : { socketPath: '/var/run/docker.sock' }
+      ).getContainer('c3-k3s-master');
+      const ready = await k3s.waitForNodeReady(masterContainer, workerNodeName, 180000);
+      if (ready) {
+        pushToRenderer('cluster:log', `✓ Worker "${prov.displayName}" Ready (${prov.ip})`);
+      } else {
+        pushToRenderer('cluster:log', `⚠ Worker "${prov.displayName}" did not become Ready within 3 minutes.`);
+      }
+    }
+  }
 
   currentSession = {
     sessionId,
@@ -870,7 +890,6 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
     tailscaleIp: masterIp,
     isDemo: Boolean(demoSessionUser),
   };
-  // Section B: save cluster state to cluster file
   saveCluster(currentSession);
 
   pushToRenderer('cluster:status', { status: 'ACTIVE', sessionId, workspacePath, providerIds, tailscaleIp: masterIp });
@@ -895,6 +914,9 @@ ipcMain.handle('cluster:accept', async (_e, { sessionId }) => {
   // Retrieve masterIp and token from request or DynamoDB session
   let masterAddress = req?.masterIp || req?.consumerMeshIp || req?.consumerIp;
   let token = req?.clusterToken || req?.k3sToken;
+  // Issue 3: get tailscaleAuthKey — from request, then local settings
+  const acceptSettings = loadSettings();
+  let tailscaleAuthKey = req?.tailscaleAuthKey || acceptSettings.tailscaleAuthKey || awsConfig.tailscaleAuthKey || '';
 
   // Set up local provider workspace and auto-sync files from consumer over P2P
   const localWsDir = path.join(os.homedir(), 'c3_workspace');
@@ -906,22 +928,30 @@ ipcMain.handle('cluster:accept', async (_e, { sessionId }) => {
   let syncSourceIp = req?.consumerIp || req?.masterIp;
   let providerWorkspace = localWsDir;
 
+  // Issue 2: extended poll — 180 s to give master time to boot, with 10s progress logs
   if (!masterAddress || !token) {
-    pushToRenderer('cluster:log', `[c3] Fetching session credentials from DynamoDB for session ${sessionId}...`);
-    // Poll up to 10 seconds for consumerMeshIp to be populated in DynamoDB
-    for (let i = 0; i < 10; i++) {
+    pushToRenderer('cluster:log', `[c3] Waiting for consumer master to come up... (polling DynamoDB, up to 3 min)`);
+    let loggedAt = Date.now();
+    for (let i = 0; i < 180; i++) {
       try {
         const dSession = await dynamo.getSession(sessionId);
         if (dSession) {
-          masterAddress = masterAddress || dSession.consumerMeshIp;
+          masterAddress = masterAddress || (dSession.consumerMeshIp && dSession.consumerMeshIp !== '' ? dSession.consumerMeshIp : null);
           token = token || dSession.k3sToken;
-          // Section F: fall back to consumerHostIp from DynamoDB for workspace sync
           if (!syncSourceIp) {
             syncSourceIp = dSession.consumerHostIp || dSession.consumerMeshIp;
+          }
+          // Issue 3: also read tailscaleAuthKey for startWorkerNode
+          if (!tailscaleAuthKey && dSession.tailscaleAuthKey) {
+            tailscaleAuthKey = dSession.tailscaleAuthKey;
           }
           if (masterAddress && token) break;
         }
       } catch (_) {}
+      if (Date.now() - loggedAt >= 10000) {
+        pushToRenderer('cluster:log', `[c3] Waiting for consumer master to come up...`);
+        loggedAt = Date.now();
+      }
       await new Promise(r => setTimeout(r, 1000));
     }
   }
@@ -942,12 +972,16 @@ ipcMain.handle('cluster:accept', async (_e, { sessionId }) => {
   if (masterAddress && token) {
     pushToRenderer('cluster:log', `[c3] Connecting to master at ${masterAddress} with cluster token...`);
     try {
-      await k3s.startWorkerNode({
+      const workerRes = await k3s.startWorkerNode({
         masterMeshIp: masterAddress,
         clusterToken: token,
         gpuEnabled: false,
         localWorkspacePath: providerWorkspace,
+        tailscaleAuthKey,   // Issue 3: Tailscale sidecar for worker
       });
+      if (workerRes?.workerTsIp) {
+        pushToRenderer('cluster:log', `[c3] Worker Tailscale IP: ${workerRes.workerTsIp}`);
+      }
       pushToRenderer('cluster:log', `✓ Connected to master cluster! Worker node is now active.`);
     } catch (err) {
       pushToRenderer('cluster:log', `✗ Failed to connect to master at ${masterAddress}: ${err.message}`);

@@ -67,9 +67,24 @@ class P2PCoordinator {
     console.log(`[P2P] Coordinator started for "${this.localNode.displayName}" (${this.localNode.ip})`);
   }
 
-  updateProfile({ displayName, specs }) {
+  updateProfile({ userId, displayName, specs }) {
+    if (userId && userId !== this.localNode.userId) {
+      const oldId = this.localNode.userId;
+      // Evict the old device- entry from the discovered map so consumers don't see a duplicate
+      this.discoveredProviders.delete(oldId);
+      this.localNode.userId = userId;
+      // Broadcast OFFLINE for the old id so other nodes remove it
+      if (this.udpSocket) {
+        const offPkt = JSON.stringify({ type: 'PROVIDER_OFFLINE', userId: oldId });
+        const offBuf = Buffer.from(offPkt, 'utf-8');
+        try { this.udpSocket.send(offBuf, 0, offBuf.length, UDP_PORT, '255.255.255.255'); } catch (_) {}
+      }
+      console.log(`[P2P] userId updated: ${oldId} -> ${userId}`);
+    }
     if (displayName) this.localNode.displayName = displayName;
     if (specs) this.localNode.specs = specs;
+    // Re-announce immediately so peers see the new userId/displayName right away
+    if (this.isSharing) this.broadcastAnnounce();
   }
 
   setSharing(active) {
