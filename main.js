@@ -38,14 +38,17 @@ try {
     identityPoolId: 'ap-south-1:65a4b02e-18e7-47b1-ab84-d8877f9b10e2',
     tailscaleAuthKey: 'tskey-auth-kuxGWyFp7S11CNTRL-Mb8qcGZZXMTVErF3YUjjMTB61TSWNgLg',
   };
-  try {
-    fs.writeFileSync(path.join(__dirname, 'aws-config.json'), JSON.stringify(awsConfig, null, 2), 'utf8');
-  } catch (_) {}
 }
 
 // ── Persistence Paths ──────────────────────────────────────────────────────
-const SESSION_FILE = path.join(app.getPath('userData'), 'c3_session.json');
+// Section B: separate auth and cluster files; A7: settings in userData
+const AUTH_FILE    = path.join(app.getPath('userData'), 'c3_auth.json');
+const CLUSTER_FILE = path.join(app.getPath('userData'), 'c3_cluster.json');
+const SETTINGS_FILE = path.join(app.getPath('userData'), 'c3_settings.json');
 const PROFILE_FILE = path.join(app.getPath('userData'), 'c3_node_profile.json');
+// Legacy file — one-time migration
+const LEGACY_SESSION_FILE = path.join(app.getPath('userData'), 'c3_session.json');
+
 const AUTH_URL = 'https://ap-south-11fuiqpnq2.auth.ap-south-1.amazoncognito.com/login?client_id=7frk04l4hn042tssu6rpievuf3&response_type=code&scope=email+openid+phone&redirect_uri=https%3A%2F%2Fd84l1y8p4kdic.cloudfront.net';
 const REDIRECT_PREFIX = 'https://d84l1y8p4kdic.cloudfront.net';
 
@@ -57,28 +60,85 @@ let requestPollInterval = null;
 let demoSessionUser = null;
 const pendingJoinRequests = new Map();
 
-function saveSession(data) {
+// ── Section B: Auth persistence ─────────────────────────────────────────────
+function saveAuth(data) {
   try {
-    fs.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.error('[session] Failed to save session:', err.message);
+    console.error('[auth] Failed to save auth:', err.message);
   }
 }
 
-function loadSession() {
+function loadAuth() {
   try {
-    if (fs.existsSync(SESSION_FILE)) {
-      return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));
+    if (fs.existsSync(AUTH_FILE)) {
+      return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'));
     }
   } catch (_) {}
   return null;
 }
 
-function clearSession() {
+function clearAuth() {
   try {
-    if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+    if (fs.existsSync(AUTH_FILE)) fs.unlinkSync(AUTH_FILE);
   } catch (_) {}
   demoSessionUser = null;
+}
+
+// ── Section B: Cluster persistence ──────────────────────────────────────────
+function saveCluster(data) {
+  try {
+    fs.writeFileSync(CLUSTER_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[cluster] Failed to save cluster:', err.message);
+  }
+}
+
+function loadCluster() {
+  try {
+    if (fs.existsSync(CLUSTER_FILE)) {
+      return JSON.parse(fs.readFileSync(CLUSTER_FILE, 'utf-8'));
+    }
+  } catch (_) {}
+  return null;
+}
+
+function clearCluster() {
+  try {
+    if (fs.existsSync(CLUSTER_FILE)) fs.unlinkSync(CLUSTER_FILE);
+  } catch (_) {}
+}
+
+// ── Section B: One-time migration from legacy c3_session.json ───────────────
+function migrateSessionFile() {
+  try {
+    if (!fs.existsSync(LEGACY_SESSION_FILE)) return;
+    const old = JSON.parse(fs.readFileSync(LEGACY_SESSION_FILE, 'utf-8'));
+    if (old && old.tokens) {
+      // Has auth tokens — migrate to auth file
+      saveAuth({ userId: old.userId, email: old.email, tokens: old.tokens, displayName: old.displayName });
+      console.log('[migrate] Moved c3_session.json -> c3_auth.json');
+    }
+    fs.unlinkSync(LEGACY_SESSION_FILE);
+  } catch (_) {}
+}
+
+// ── Section A7: Settings helpers ─────────────────────────────────────────────
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+    }
+  } catch (_) {}
+  return {};
+}
+
+function saveSettings(data) {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[settings] Failed to save settings:', err.message);
+  }
 }
 
 function loadAllProfiles() {
@@ -114,9 +174,24 @@ function saveProfileForEmail(email, data) {
 }
 
 function loadProfile(email) {
-  const targetEmail = email || cognito.getEmail() || demoSessionUser?.email || loadSession()?.email || '';
+  const saved = loadAuth();
+  const targetEmail = email || cognito.getEmail() || demoSessionUser?.email || saved?.email || '';
   if (targetEmail) return getProfileForEmail(targetEmail);
   return { displayName: '' };
+}
+
+// ── Section C: Wire cognito token refresh callback ───────────────────────────
+// This is called after app.whenReady so loadAuth() is available
+function setupCognitoRefreshCallback() {
+  cognito.setOnTokensRefreshed((freshTokens) => {
+    try {
+      const saved = loadAuth();
+      if (saved) {
+        saveAuth({ ...saved, tokens: freshTokens });
+        console.log('[auth] Persisted refreshed tokens to c3_auth.json');
+      }
+    } catch (_) {}
+  });
 }
 
 // ── Window Management ──────────────────────────────────────────────────────
@@ -172,13 +247,14 @@ function createWindow() {
         const profile = getProfileForEmail(user.email);
         const displayName = profile?.displayName || '';
 
-        const sessionData = {
+        // Section B: save to auth file, not session file
+        const authData = {
           userId: user.userId,
           email: user.email,
           tokens: user.tokens,
           displayName,
         };
-        saveSession(sessionData);
+        saveAuth(authData);
 
         p2p.updateProfile({ displayName });
 
@@ -234,20 +310,43 @@ function createWindow() {
     }
   });
 
-  // Check if saved session exists and is still valid
-  const saved = loadSession();
+  // Section B: Check saved auth (not cluster session) on startup
+  // Section C: If idToken is expired, try refresh before falling back to AUTH_URL
+  const saved = loadAuth();
   let hasValidSession = false;
   if (saved?.tokens?.idToken) {
-    try {
-      cognito.restoreSession(saved.tokens);
-      if (cognito.getUserId()) {
-        hasValidSession = true;
+    (async () => {
+      try {
+        cognito.restoreSession(saved.tokens);
+        if (cognito.getUserId()) {
+          // Section C: check if idToken is already expired
+          const tokenPayload = saved.tokens.idToken.split('.')[1];
+          const decoded = JSON.parse(Buffer.from(tokenPayload, 'base64url').toString('utf-8'));
+          const expSec = decoded.exp || 0;
+          const nowSec = Math.floor(Date.now() / 1000);
+          if (expSec > 0 && expSec < nowSec && saved.tokens.refreshToken) {
+            console.log('[auth] Saved idToken expired — attempting refresh on startup...');
+            try {
+              await cognito.refreshTokens();
+              // Persist fresh tokens
+              const freshCreds = cognito.getCredentials();
+              saveAuth({ ...saved, tokens: freshCreds });
+              hasValidSession = true;
+            } catch (refreshErr) {
+              console.warn('[auth] Startup refresh failed:', refreshErr.message);
+              hasValidSession = false;
+            }
+          } else {
+            hasValidSession = true;
+          }
+        }
+      } catch (_) {}
+      if (hasValidSession) {
+        mainWindow.loadFile(distHtml);
+      } else {
+        mainWindow.loadURL(AUTH_URL);
       }
-    } catch (_) {}
-  }
-
-  if (hasValidSession) {
-    mainWindow.loadFile(distHtml);
+    })();
   } else {
     // Directly give AWS Cognito Hosted UI!
     mainWindow.loadURL(AUTH_URL);
@@ -291,6 +390,7 @@ function startProviderLoop(userId) {
       const requests = await dynamo.getPendingClusterRequestsForProvider(userId);
       if (requests && requests.length > 0) {
         for (const req of requests) {
+          // Section F: deduplicate — same check as P2P onRequestReceived
           if (!pendingJoinRequests.has(req.sessionId)) {
             pendingJoinRequests.set(req.sessionId, req);
             pushToRenderer('cluster:request', req);
@@ -312,7 +412,8 @@ function stopProviderLoop() {
 ipcMain.handle('auth:getuser', async () => {
   if (demoSessionUser) return demoSessionUser;
 
-  const saved = loadSession();
+  // Section B: load from auth file
+  const saved = loadAuth();
   if (saved?.tokens?.idToken) {
     try {
       cognito.restoreSession(saved.tokens);
@@ -343,7 +444,7 @@ ipcMain.handle('auth:getuser', async () => {
 });
 
 ipcMain.handle('auth:open-aws-login', async () => {
-  clearSession();
+  clearAuth();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(AUTH_URL);
   }
@@ -351,7 +452,7 @@ ipcMain.handle('auth:open-aws-login', async () => {
 });
 
 ipcMain.handle('auth:open-hosted-login', async () => {
-  clearSession();
+  clearAuth();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(AUTH_URL);
   }
@@ -368,7 +469,8 @@ ipcMain.handle('auth:login', async (_e, { email, password }) => {
       suggestedName: os.hostname() || 'My-Laptop',
       credits: 250,
     };
-    saveSession(demoSessionUser);
+    // Section B: save demo user to auth file
+    saveAuth(demoSessionUser);
     return demoSessionUser;
   }
 
@@ -378,13 +480,14 @@ ipcMain.handle('auth:login', async (_e, { email, password }) => {
   const profile = getProfileForEmail(result.email);
   const displayName = profile?.displayName || '';
 
-  const sessionData = {
+  // Section B: save tokens to auth file only
+  const authData = {
     userId: result.userId,
     email: result.email,
     tokens: result.tokens,
     displayName,
   };
-  saveSession(sessionData);
+  saveAuth(authData);
 
   p2p.updateProfile({ displayName });
 
@@ -411,14 +514,17 @@ ipcMain.handle('auth:set-name', async (_e, { displayName }) => {
   const cleanName = (displayName || '').trim();
   if (!cleanName) throw new Error('Machine name cannot be blank.');
 
-  const email = cognito.getEmail() || demoSessionUser?.email || loadSession()?.email || '';
+  // Section B: read auth for email
+  const saved = loadAuth();
+  const email = cognito.getEmail() || demoSessionUser?.email || saved?.email || '';
   if (email) {
     saveProfileForEmail(email, { displayName: cleanName });
   }
 
-  const session = loadSession() || {};
-  session.displayName = cleanName;
-  saveSession(session);
+  // Update auth file with displayName
+  if (saved) {
+    saveAuth({ ...saved, displayName: cleanName });
+  }
 
   p2p.updateProfile({ displayName: cleanName });
 
@@ -440,8 +546,8 @@ ipcMain.handle('auth:set-name', async (_e, { displayName }) => {
   return {
     ok: true,
     user: {
-      userId: session.userId || userId,
-      email: email || session.email || cleanName,
+      userId: saved?.userId || userId,
+      email: email || saved?.email || cleanName,
       displayName: cleanName,
       credits: 100,
     },
@@ -451,7 +557,9 @@ ipcMain.handle('auth:set-name', async (_e, { displayName }) => {
 ipcMain.handle('auth:signout', async () => {
   stopProviderLoop();
   providerActive = false;
-  clearSession();
+  // Section B: clear both auth and cluster
+  clearAuth();
+  clearCluster();
   dynamo.resetClient();
   await cognito.signOut().catch(() => {});
   p2p.setSharing(false);
@@ -502,8 +610,9 @@ ipcMain.handle('provider:toggle', async (_e, { active }) => {
   }
 
   if (providerActive) {
-    const session = loadSession() || {};
-    const displayName = session.displayName || getProfileForEmail(session.email)?.displayName || os.hostname() || 'Compute Node';
+    // Section B: read displayName from auth file
+    const saved = loadAuth() || {};
+    const displayName = saved.displayName || getProfileForEmail(saved.email)?.displayName || os.hostname() || 'Compute Node';
 
     // Update p2p with correct userId now that we're authenticated
     p2p.updateProfile({ displayName });
@@ -569,12 +678,14 @@ ipcMain.handle('providers:list', async () => {
   if (providerActive && currentUserId) {
     try {
       const specs = hardware.getHardwareSpecs ? await hardware.getHardwareSpecs() : {}; // instant — cached
-      const email = cognito.getEmail() || loadSession()?.email || '';
+      // Section B: read from auth file
+      const saved = loadAuth();
+      const email = cognito.getEmail() || saved?.email || '';
       const profile = getProfileForEmail(email);
       const existing = merged.get(currentUserId) || {};
       merged.set(currentUserId, {
         userId: currentUserId,
-        displayName: profile?.displayName || existing.displayName || loadSession()?.displayName || os.hostname() || 'This Machine',
+        displayName: profile?.displayName || existing.displayName || saved?.displayName || os.hostname() || 'This Machine',
         cpuModel: specs.cpuModel || existing.cpuModel,
         cpuCores: specs.cpuCores || existing.cpuCores,
         ramGb: specs.ramGb || existing.ramGb,
@@ -646,13 +757,9 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   const masterIp = net.ip;
   pushToRenderer('cluster:log', `[c3] Master network endpoint: ${net.type.toUpperCase()} (${masterIp})`);
 
-  let tailscaleAuthKey = '';
-  try {
-    const freshCfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'aws-config.json'), 'utf8'));
-    tailscaleAuthKey = freshCfg.tailscaleAuthKey || '';
-  } catch {
-    tailscaleAuthKey = awsConfig.tailscaleAuthKey || '';
-  }
+  // Section A7: read tailscale key from settings first, then awsConfig fallback
+  const settings = loadSettings();
+  let tailscaleAuthKey = settings.tailscaleAuthKey || awsConfig.tailscaleAuthKey || '';
 
   // Register in DynamoDB
   if (!demoSessionUser) {
@@ -664,6 +771,8 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
         k3sToken: clusterToken,
         tailscaleAuthKey,
         consumerMeshIp: masterIp,
+        // Section F: also persist the host IP for workspace sync on provider side
+        consumerHostIp: masterIp,
       });
     } catch (e) {
       console.warn('[dynamo] createClusterSession note:', e.message);
@@ -759,8 +868,10 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
     clusterToken,
     providerIds,
     tailscaleIp: masterIp,
+    isDemo: Boolean(demoSessionUser),
   };
-  saveSession(currentSession);
+  // Section B: save cluster state to cluster file
+  saveCluster(currentSession);
 
   pushToRenderer('cluster:status', { status: 'ACTIVE', sessionId, workspacePath, providerIds, tailscaleIp: masterIp });
   startPodWatchdog();
@@ -790,13 +901,9 @@ ipcMain.handle('cluster:accept', async (_e, { sessionId }) => {
   if (!fs.existsSync(localWsDir)) {
     try { fs.mkdirSync(localWsDir, { recursive: true }); } catch (_) {}
   }
-  const syncSourceIp = req?.consumerIp || req?.masterIp;
-  if (syncSourceIp) {
-    pushToRenderer('cluster:log', `[c3] Syncing workspace files from consumer at ${syncSourceIp}...`);
-    try {
-      await p2p.syncWorkspaceFromConsumer({ consumerIp: syncSourceIp, targetDir: localWsDir });
-    } catch (_) {}
-  }
+
+  // Section F: if consumerIp is missing, use consumerHostIp from DynamoDB session
+  let syncSourceIp = req?.consumerIp || req?.masterIp;
   let providerWorkspace = localWsDir;
 
   if (!masterAddress || !token) {
@@ -808,10 +915,27 @@ ipcMain.handle('cluster:accept', async (_e, { sessionId }) => {
         if (dSession) {
           masterAddress = masterAddress || dSession.consumerMeshIp;
           token = token || dSession.k3sToken;
+          // Section F: fall back to consumerHostIp from DynamoDB for workspace sync
+          if (!syncSourceIp) {
+            syncSourceIp = dSession.consumerHostIp || dSession.consumerMeshIp;
+          }
           if (masterAddress && token) break;
         }
       } catch (_) {}
       await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  // Section F: sync workspace, log clearly on failure
+  if (syncSourceIp) {
+    pushToRenderer('cluster:log', `[c3] Syncing workspace files from consumer at ${syncSourceIp}...`);
+    try {
+      const synced = await p2p.syncWorkspaceFromConsumer({ consumerIp: syncSourceIp, targetDir: localWsDir });
+      if (!synced) {
+        pushToRenderer('cluster:log', `[c3] Workspace sync failed: consumer at ${syncSourceIp} did not return files.`);
+      }
+    } catch (syncErr) {
+      pushToRenderer('cluster:log', `[c3] Workspace sync failed: ${syncErr.message}`);
     }
   }
 
@@ -875,7 +999,18 @@ ipcMain.handle('cluster:decline', async (_e, { sessionId }) => {
 ipcMain.handle('cluster:stop', async () => {
   stopPodWatchdog();
   await k3s.stopCluster().catch(() => {});
-  clearSession();
+
+  // Section A5: mark the DynamoDB session as ENDED
+  if (currentSession && currentSession.sessionId && !currentSession.isDemo) {
+    try {
+      await dynamo.setClusterStatus(currentSession.sessionId, 'ENDED');
+    } catch (_) {}
+  }
+
+  // Section B: only clear the cluster file, not the auth file
+  clearCluster();
+  currentSession = null;
+
   pushToRenderer('cluster:log', '[c3] Cluster session ended.');
   return { ok: true };
 });
@@ -890,23 +1025,19 @@ function startPodWatchdog() {
       const { exec: _exec } = require('child_process');
       const { promisify: _prom } = require('util');
       const _ea = _prom(_exec);
+      // Section E9: check DaemonSet readiness instead of single pod name
       const { stdout } = await _ea(
-        'docker exec c3-k3s-master kubectl get pod c3-worker-runner -o jsonpath={.status.phase} 2>/dev/null',
+        'docker exec c3-k3s-master kubectl get daemonset c3-runner -o jsonpath={.status.numberReady}/{.status.desiredNumberScheduled} 2>/dev/null',
         { timeout: 8000 }
       );
-      const phase = stdout.trim();
-      // ⚠ Do NOT redeploy if Pending/ContainerCreating — image is still pulling
-      // Only redeploy if pod is Failed or completely gone
-      if (phase === 'Running') return; // all good
-      if (phase === 'Pending' || phase === 'ContainerCreating') {
-        console.log(`[watchdog] c3-worker-runner is ${phase} — waiting for image pull, not redeploying.`);
-        return;
-      }
-      // Failed, Succeeded (exited), Unknown, or empty (NotFound)
-      console.log(`[watchdog] c3-worker-runner phase="${phase}" — redeploying...`);
-      pushToRenderer('cluster:log', `[c3] Watchdog: pod is ${phase || 'gone'} — redeploying workload pod...`);
+      const parts = (stdout || '').trim().split('/');
+      const ready = parseInt(parts[0], 10);
+      const desired = parseInt(parts[1], 10);
+      if (!isNaN(ready) && !isNaN(desired) && desired > 0 && ready >= desired) return; // all good
+      console.log(`[watchdog] c3-runner DaemonSet: ${stdout.trim()} -- redeploying...`);
+      pushToRenderer('cluster:log', `[c3] Watchdog: runner DaemonSet not ready (${stdout.trim()}) -- redeploying...`);
       await k3s.deployDefaultPods().catch(() => {});
-      pushToRenderer('cluster:log', '✓ Workload pod redeployed by watchdog.');
+      pushToRenderer('cluster:log', '\u2713 Workload pods redeployed by watchdog.');
     } catch (_) {}
   }, 30_000);
 }
@@ -1012,6 +1143,45 @@ ipcMain.handle('cluster:network-debug', async () => {
   return { tailscale: tailscaleStatus, juicefs, containers, k3sApi, ts: Date.now() };
 });
 
+// ── IPC: Credits ──────────────────────────────────────────────────────────
+// Section A6: credits:get handler
+ipcMain.handle('credits:get', async () => {
+  if (demoSessionUser) return { credits: 250 };
+  const userId = cognito.getUserId();
+  if (!userId) return { credits: 100 };
+  try {
+    const dbUser = await dynamo.getUser(userId);
+    return { credits: dbUser?.credits !== undefined ? dbUser.credits : 100 };
+  } catch (_) {
+    return { credits: 100 };
+  }
+});
+
+// ── IPC: Settings ──────────────────────────────────────────────────────────
+// Section A6: settings:get-tailscale-key handler
+ipcMain.handle('settings:get-tailscale-key', async () => {
+  const settings = loadSettings();
+  const rawKey = settings.tailscaleAuthKey || awsConfig.tailscaleAuthKey || '';
+  if (!rawKey) return { key: '' };
+  // Mask all but the last 4 characters
+  const masked = rawKey.length > 4
+    ? '*'.repeat(rawKey.length - 4) + rawKey.slice(-4)
+    : rawKey;
+  return { key: masked };
+});
+
+// Section A6: settings:save-tailscale-key handler
+ipcMain.handle('settings:save-tailscale-key', async (_e, key) => {
+  const k = (key || '').trim();
+  if (!k.startsWith('tskey-')) {
+    throw new Error('Invalid Tailscale auth key. It must start with "tskey-".');
+  }
+  const settings = loadSettings();
+  settings.tailscaleAuthKey = k;
+  saveSettings(settings);
+  return { ok: true };
+});
+
 // ── IPC: Setup Checker & System ──────────────────────────────────────────
 ipcMain.handle('setup:check', async () => {
   try {
@@ -1040,6 +1210,20 @@ ipcMain.handle('setup:install-tailscale', async () => {
     await setupChecker.installTailscale(msg => {
       logs.push(msg);
       pushToRenderer('setup:install-progress', msg);
+    });
+    return { ok: true, logs };
+  } catch (err) {
+    return { ok: false, error: err.message, logs };
+  }
+});
+
+// Section E11: pull Tailscale Docker image
+ipcMain.handle('setup:pull-tailscale-image', async () => {
+  const logs = [];
+  try {
+    await setupChecker.pullTailscaleImage(msg => {
+      logs.push(msg);
+      pushToRenderer('setup:pull-ts-image-progress', msg);
     });
     return { ok: true, logs };
   } catch (err) {
@@ -1096,6 +1280,12 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    // Section B: one-time migration from legacy session file
+    migrateSessionFile();
+
+    // Section C: wire refresh callback before createWindow so any startup refresh persists
+    setupCognitoRefreshCallback();
+
     createWindow();
 
     // Warm up hardware specs in background (cache for later calls)
@@ -1104,7 +1294,8 @@ if (!gotSingleInstanceLock) {
     // Start P2P coordinator non-blocking after app opens
     setImmediate(async () => {
       try {
-        const saved = loadSession();
+        // Section B: load from auth file
+        const saved = loadAuth();
         const profile = saved?.email ? getProfileForEmail(saved.email) : loadProfile();
         // Use real userId from session (not 'local-node') so dedup works correctly
         const userId = cognito.getUserId() || saved?.userId || `device-${require('os').hostname()}`;
@@ -1118,6 +1309,8 @@ if (!gotSingleInstanceLock) {
         }).catch(() => {});
 
         p2p.onRequestReceived = (req) => {
+          // Section F: deduplicate — same check as DynamoDB poller
+          if (pendingJoinRequests.has(req.sessionId)) return;
           pendingJoinRequests.set(req.sessionId, req);
           pushToRenderer('cluster:request', {
             sessionId: req.sessionId,

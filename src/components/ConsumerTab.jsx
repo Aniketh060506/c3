@@ -211,7 +211,7 @@ export default function ConsumerTab({ user, onSwitchToProvider }) {
   };
 
   const endSession = async () => {
-    if (window.c3?.stopClusterSession) await window.c3.stopClusterSession().catch(() => {});
+    if (window.c3?.stopCluster) await window.c3.stopCluster().catch(() => {});
     setActiveSession(null);
     setStatusMsg('');
   };

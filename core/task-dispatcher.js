@@ -15,6 +15,11 @@ const Docker = require('dockerode');
 const MASTER_CONTAINER_NAME = 'c3-k3s-master';
 const WORKER_CONTAINER_NAME = 'c3-k3s-worker';
 
+// Section D: overall job timeout (60 min, configurable)
+const JOB_OVERALL_TIMEOUT_MS = 60 * 60 * 1000;
+// Image pull wait (10 min)
+const IMAGE_PULL_TIMEOUT_MS = 10 * 60 * 1000;
+
 let _docker = null;
 function getDocker() {
   if (!_docker) {
@@ -31,6 +36,7 @@ let activeExecutionProcess = null;
 
 /**
  * Executes a command inside the master container cleanly and returns stdout.
+ * Section D: On timeout, rejects with a clear error instead of silently resolving.
  * @param {object} container - Dockerode container.
  * @param {string|string[]} cmd - Command to run.
  * @param {number} timeoutMs
@@ -47,14 +53,20 @@ async function runInContainer(container, cmd, timeoutMs = 25000) {
   return new Promise((resolve, reject) => {
     let stdoutBuf = '';
     let stderrBuf = '';
+    let timedOut = false;
     docker.modem.demuxStream(
       stream,
       { write: chunk => (stdoutBuf += chunk.toString('utf8')) },
       { write: chunk => (stderrBuf += chunk.toString('utf8')) }
     );
-    stream.on('end', () => resolve((stdoutBuf || stderrBuf).trim()));
+    stream.on('end', () => {
+      if (!timedOut) resolve((stdoutBuf || stderrBuf).trim());
+    });
     stream.on('error', reject);
-    setTimeout(() => resolve((stdoutBuf || stderrBuf).trim()), timeoutMs);
+    setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`Command timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
   });
 }
 
@@ -263,6 +275,47 @@ function getTargetContainers(targetKey) {
 }
 
 /**
+ * Section D: Resolve runner pod name for a specific node.
+ * Uses the c3-runner DaemonSet label to find the pod on the requested node.
+ * Falls back to the control-plane runner if no worker pod is found.
+ * @param {object} masterContainer - Dockerode container
+ * @param {string|null} preferredNode - node name, or null for first worker
+ * @returns {Promise<{podName: string, nodeName: string}>}
+ */
+async function resolveRunnerPod(masterContainer, preferredNode) {
+  try {
+    const out = await runInContainer(
+      masterContainer,
+      `kubectl get pods -l app=c3-runner -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{"\\n"}{end}' 2>/dev/null`,
+      8000
+    );
+    const entries = (out || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+      const parts = l.split(' ');
+      return { podName: parts[0], nodeName: parts[1] };
+    });
+
+    if (entries.length === 0) {
+      // Fallback: old single pod name
+      return { podName: 'c3-worker-runner', nodeName: 'c3-control-plane' };
+    }
+
+    if (preferredNode) {
+      const match = entries.find(e => e.nodeName === preferredNode);
+      if (match) return match;
+    }
+
+    // Prefer non-control-plane runner
+    const worker = entries.find(e => !e.nodeName.includes('control-plane') && !e.nodeName.includes('master'));
+    if (worker) return worker;
+
+    // Fall back to control-plane runner
+    return entries[0];
+  } catch (_) {
+    return { podName: 'c3-worker-runner', nodeName: 'c3-control-plane' };
+  }
+}
+
+/**
  * Dispatches an interactive shell command or distributed workload across cluster nodes.
  * Supports:
  *   - cd <dir> / cd .. / cd ~ with persistent cwd tracking
@@ -290,17 +343,18 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
       const docker = getDocker();
       const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
       try {
-        const out = await runInContainer(masterContainer, `kubectl exec c3-worker-runner -- sh -c "cd '${currentCwd}' 2>/dev/null && cd ${dest} && pwd"`, 8000);
+        const { podName } = await resolveRunnerPod(masterContainer, null);
+        const out = await runInContainer(masterContainer, `kubectl exec ${podName} -- sh -c "cd '${currentCwd}' 2>/dev/null && cd ${dest} && pwd"`, 8000);
         const line = (out || '').split('\n').map(l => l.trim()).filter(Boolean).pop();
         if (line && line.startsWith('/')) {
           nodeCwds['pod'] = line;
           return { ok: true, cwd: line, target: targetKey };
         } else {
-          onLog(`c3-worker-runner: cd: ${dest}: No such file or directory`);
+          onLog(`c3-runner: cd: ${dest}: No such file or directory`);
           return { ok: false, cwd: currentCwd, target: targetKey };
         }
       } catch (err) {
-        onLog(`[c3-worker-runner] [ERROR] ${err.message}`);
+        onLog(`[c3-runner] [ERROR] ${err.message}`);
         return { ok: false, cwd: currentCwd, target: targetKey };
       }
     }
@@ -360,7 +414,7 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
   }
 
   // ── 4. Explicit Workload / Distributed Job Dispatch (job ..., c3 run ..., python ...) ──
-  // NOTE: if target=pod, skip job dispatch — run directly via kubectl exec into c3-worker-runner
+  // NOTE: if target=pod, skip job dispatch — run directly via kubectl exec into c3-runner
   if (targetKey !== 'pod' && /^(job|c3\s+run|workload|python3?)\b/i.test(trimmed)) {
     const jobCmd = trimmed.replace(/^(job|c3\s+run|workload)\s*/i, '').trim();
     return await runDistributedPodJob({ targetKey, cleanCmd: jobCmd, currentCwd, onLog });
@@ -373,7 +427,7 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
     else if (/2|worker/i.test(trimmed)) nextTarget = 'node-2';
     else if (/all|both/i.test(trimmed)) nextTarget = 'both';
     const nextCwd = nodeCwds[nextTarget] || '/workspace';
-    const label = nextTarget === 'pod' ? 'Workload Pod (c3-worker-runner)' : nextTarget === 'node-2' ? 'Node 2 (c3-self-worker)' : nextTarget === 'both' ? 'All Nodes (Parallel)' : 'Node 1 (Control Plane)';
+    const label = nextTarget === 'pod' ? 'Workload Pod (c3-runner)' : nextTarget === 'node-2' ? 'Node 2 (Worker)' : nextTarget === 'both' ? 'All Nodes (Parallel)' : 'Node 1 (Control Plane)';
     onLog(`[c3] Active target switched to: ${label}`);
     return { ok: true, cwd: nextCwd, target: nextTarget, switchTarget: nextTarget };
   }
@@ -389,12 +443,13 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
     const docker = getDocker();
     const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
     try {
-      const output = await runInContainer(masterContainer, `kubectl exec c3-worker-runner -- sh -c "cd '${currentCwd}' && ${cleanCmd}"`, 45000);
+      const { podName, nodeName } = await resolveRunnerPod(masterContainer, null);
+      const output = await runInContainer(masterContainer, `kubectl exec ${podName} -- sh -c "cd '${currentCwd}' && ${cleanCmd}"`, 45000);
       if (output) {
         output.split('\n').forEach(line => onLog(line));
       }
     } catch (err) {
-      onLog(`[c3-worker-runner] [ERROR] ${err.message}`);
+      onLog(`[c3-runner] [ERROR] ${err.message}`);
     }
     return { ok: true, cwd: currentCwd, target: targetKey };
   }
@@ -402,7 +457,9 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
   if (targetKey === 'both') {
     const docker = getDocker();
     const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
-    // 1. Run on control plane
+    // Section D/E9: resolve runner pod per node and label with real node name
+    const nodes = await getClusterNodes().catch(() => []);
+    // Run on control plane container directly
     try {
       const outMaster = await runInContainer(masterContainer, `cd "${currentCwd}" && ${cleanCmd}`, 30000);
       if (outMaster) {
@@ -411,14 +468,29 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
     } catch (err) {
       onLog(`[control-plane] [ERROR] ${err.message}`);
     }
-    // 2. Run on worker workload runner
+    // Run on each non-control-plane runner pod
     try {
-      const outWorker = await runInContainer(masterContainer, `kubectl exec c3-worker-runner -- sh -c "cd '${currentCwd}' && ${cleanCmd}"`, 30000);
-      if (outWorker) {
-        outWorker.split('\n').forEach(line => onLog(`[worker-node] ${line}`));
+      const out = await runInContainer(masterContainer,
+        `kubectl get pods -l app=c3-runner -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{"\\n"}{end}' 2>/dev/null`,
+        8000
+      );
+      const runnerPods = (out || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+        const p = l.split(' ');
+        return { podName: p[0], nodeName: p[1] };
+      }).filter(e => e.nodeName && !e.nodeName.includes('control-plane'));
+
+      for (const { podName, nodeName } of runnerPods) {
+        try {
+          const podOut = await runInContainer(masterContainer, `kubectl exec ${podName} -- sh -c "cd '${currentCwd}' && ${cleanCmd}"`, 30000);
+          if (podOut) {
+            podOut.split('\n').forEach(line => onLog(`[${nodeName}] ${line}`));
+          }
+        } catch (err) {
+          onLog(`[${nodeName}] [ERROR] ${err.message}`);
+        }
       }
     } catch (err) {
-      onLog(`[worker-node] [ERROR] ${err.message}`);
+      onLog(`[worker] [ERROR] ${err.message}`);
     }
     return { ok: true, cwd: currentCwd, target: 'both' };
   }
@@ -438,6 +510,15 @@ async function dispatchWorkload({ target, command, onLog = () => {} }) {
   return { ok: true, cwd: currentCwd, target: targetKey };
 }
 
+/**
+ * Section D: Runs a distributed pod job with proper lifecycle management.
+ * 1. Applies the pod (with base64-encoded command to avoid shell injection).
+ * 2. Waits up to 10 min for image pull (Pending -> Running).
+ * 3. Streams logs live via kubectl logs -f.
+ * 4. Reads final phase and exit code.
+ * 5. Deletes the pod (no --force).
+ * 6. Runs "both" targets in parallel with Promise.all.
+ */
 async function runDistributedPodJob({ targetKey, cleanCmd, currentCwd, onLog }) {
   const docker = getDocker();
   const masterContainer = docker.getContainer(MASTER_CONTAINER_NAME);
@@ -467,7 +548,8 @@ async function runDistributedPodJob({ targetKey, cleanCmd, currentCwd, onLog }) 
 
   onLog(`[dispatcher] Launching job across: ${targets.join(', ')}`);
 
-  for (const nodeName of targets) {
+  // Section D: run "both" in parallel
+  const runOneNode = async (nodeName) => {
     const podId = `c3-job-${Math.random().toString(36).substring(2, 7)}`;
     onLog(`[node:${nodeName}] Submitting job pod: ${podId}...`);
 
@@ -475,6 +557,10 @@ async function runDistributedPodJob({ targetKey, cleanCmd, currentCwd, onLog }) 
     if (/python/i.test(cleanCmd)) runnerImage = 'python:3.10-slim';
     else if (/rust|cargo/i.test(cleanCmd)) runnerImage = 'rust:latest';
     else if (/node|npm/i.test(cleanCmd)) runnerImage = 'node:20-slim';
+
+    // Section D: base64-encode command to avoid shell injection issues
+    const fullCmd = `cd ${currentCwd} 2>/dev/null || cd /workspace 2>/dev/null || cd /; ${cleanCmd}`;
+    const b64Cmd = Buffer.from(fullCmd).toString('base64');
 
     const podYaml = `apiVersion: v1
 kind: Pod
@@ -488,38 +574,151 @@ spec:
       image: ${runnerImage}
       command: ["/bin/sh", "-c"]
       args:
-        - "cd ${currentCwd} 2>/dev/null || cd /workspace 2>/dev/null || cd /; ${cleanCmd.replace(/"/g, '\\"')}"
+        - "echo ${b64Cmd} | base64 -d | sh"
       volumeMounts:
         - name: workspace-vol
           mountPath: /workspace
   volumes:
     - name: workspace-vol
       hostPath:
-        path: /workspace
-`.trim();
+        path: /workspace`.trim();
 
     try {
+      // Apply the pod
       await runInContainer(masterContainer, `cat <<'EOF' | kubectl apply -f -\n${podYaml}\nEOF`, 10000);
-      let waited = 0;
+
+      // Section D step 2: Wait up to 10 min for phase to leave Pending (image pull)
+      const pullDeadline = Date.now() + IMAGE_PULL_TIMEOUT_MS;
       let phase = '';
-      while (waited < 20000) {
-        phase = await runInContainer(masterContainer, `kubectl get pod ${podId} -o jsonpath='{.status.phase}' 2>/dev/null`, 4000);
+      let lastLoggedPhase = '';
+      while (Date.now() < pullDeadline) {
+        phase = await runInContainer(masterContainer, `kubectl get pod ${podId} -o jsonpath='{.status.phase}' 2>/dev/null`, 4000).catch(() => '');
+        phase = (phase || '').replace(/'/g, '').trim();
+
         if (phase === 'Running' || phase === 'Succeeded' || phase === 'Failed') break;
-        await new Promise(r => setTimeout(r, 1200));
-        waited += 1200;
+
+        // Check for image pull errors
+        const containerStatus = await runInContainer(masterContainer,
+          `kubectl get pod ${podId} -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null`, 4000
+        ).catch(() => '');
+        const reason = (containerStatus || '').replace(/'/g, '').trim();
+        if (reason === 'ErrImagePull' || reason === 'ImagePullBackOff') {
+          onLog(`✗ [node:${nodeName}] Image pull failed (${reason}). Check image name: ${runnerImage}`);
+          await runInContainer(masterContainer, `kubectl delete pod ${podId} --ignore-not-found 2>/dev/null`, 5000).catch(() => {});
+          return;
+        }
+
+        if (phase !== lastLoggedPhase) {
+          onLog(`[node:${nodeName}] waiting for image pull... (${phase || 'pending'})`);
+          lastLoggedPhase = phase;
+        }
+        await new Promise(r => setTimeout(r, 10000));
       }
-      const podLogs = await runInContainer(masterContainer, `kubectl logs ${podId} --tail=100 2>&1`, 15000);
-      if (podLogs) {
-        podLogs.split('\n').map(l => l.trim()).filter(Boolean).forEach(l => onLog(`[${nodeName}] ${l}`));
+
+      if (phase !== 'Running' && phase !== 'Succeeded' && phase !== 'Failed') {
+        onLog(`✗ [node:${nodeName}] Image pull timed out after 10 minutes.`);
+        await runInContainer(masterContainer, `kubectl delete pod ${podId} --ignore-not-found 2>/dev/null`, 5000).catch(() => {});
+        return;
       }
-      runInContainer(masterContainer, `kubectl delete pod ${podId} --grace-period=0 --force --ignore-not-found 2>/dev/null`, 5000).catch(() => {});
-      onLog(`✓ [node:${nodeName}] Job completed.`);
+
+      // Section D step 3: Stream logs live with kubectl logs -f
+      if (phase === 'Running') {
+        onLog(`[node:${nodeName}] Job running — streaming logs...`);
+        await streamPodLogs(masterContainer, podId, nodeName, onLog);
+      }
+
+      // Section D step 4: Read final phase and exit code
+      const finalPhase = await runInContainer(masterContainer, `kubectl get pod ${podId} -o jsonpath='{.status.phase}' 2>/dev/null`, 4000).catch(() => '');
+      const exitCodeStr = await runInContainer(masterContainer,
+        `kubectl get pod ${podId} -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null`, 4000
+      ).catch(() => '');
+      const exitCode = parseInt((exitCodeStr || '').replace(/'/g, '').trim(), 10);
+
+      if (exitCode === 0 || finalPhase === 'Succeeded') {
+        onLog(`✓ [node:${nodeName}] Job completed (exit 0)`);
+      } else {
+        onLog(`✗ [node:${nodeName}] Job failed (exit ${isNaN(exitCode) ? '?' : exitCode})`);
+      }
+
+      // Section D step 5: Delete pod without --force
+      await runInContainer(masterContainer, `kubectl delete pod ${podId} --ignore-not-found 2>/dev/null`, 10000).catch(() => {});
     } catch (err) {
       onLog(`✗ [node:${nodeName}] Error: ${err.message}`);
+    }
+  };
+
+  // Section D step 6: run in parallel for "both"
+  if (targetKey === 'both' || targets.length > 1) {
+    await Promise.all(targets.map(nodeName => runOneNode(nodeName)));
+  } else {
+    for (const nodeName of targets) {
+      await runOneNode(nodeName);
     }
   }
 
   return { ok: true, cwd: currentCwd, target: targetKey };
+}
+
+/**
+ * Section D: Stream pod logs live with kubectl logs -f using a Dockerode exec stream.
+ * Each line is pushed to onLog as it arrives. Overall timeout: JOB_OVERALL_TIMEOUT_MS.
+ * @param {object} masterContainer
+ * @param {string} podId
+ * @param {string} nodeLabel - label prefix for each log line
+ * @param {function} onLog
+ */
+async function streamPodLogs(masterContainer, podId, nodeLabel, onLog) {
+  return new Promise(async (resolve) => {
+    const docker = getDocker();
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+
+    const overallTimer = setTimeout(() => {
+      onLog(`[node:${nodeLabel}] Job log stream timed out after ${JOB_OVERALL_TIMEOUT_MS / 60000} minutes.`);
+      done();
+    }, JOB_OVERALL_TIMEOUT_MS);
+
+    try {
+      const execObj = await masterContainer.exec({
+        Cmd: ['/bin/sh', '-c', `kubectl logs -f ${podId} 2>/dev/null`],
+        AttachStdout: true,
+        AttachStderr: true,
+      });
+      const stream = await execObj.start({ hijack: true, stdin: false });
+
+      let lineBuf = '';
+      const handleChunk = (chunk) => {
+        const text = chunk.toString('utf8');
+        lineBuf += text;
+        const lines = lineBuf.split('\n');
+        lineBuf = lines.pop(); // keep incomplete last line
+        for (const line of lines) {
+          onLog(`[${nodeLabel}] ${line}`);
+        }
+      };
+
+      docker.modem.demuxStream(
+        stream,
+        { write: handleChunk },
+        { write: handleChunk }
+      );
+
+      stream.on('end', () => {
+        // Flush remaining buffer
+        if (lineBuf.trim()) onLog(`[${nodeLabel}] ${lineBuf}`);
+        clearTimeout(overallTimer);
+        done();
+      });
+      stream.on('error', () => {
+        clearTimeout(overallTimer);
+        done();
+      });
+    } catch (err) {
+      onLog(`[node:${nodeLabel}] Log stream error: ${err.message}`);
+      clearTimeout(overallTimer);
+      done();
+    }
+  });
 }
 
 module.exports = {

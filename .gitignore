@@ -13,6 +13,10 @@ out/
 # ── Credentials & Local State ─────────────────────────────
 aws-config.json
 c3_session.json
+c3_auth.json
+c3_cluster.json
+c3_settings.json
+c3_node_profile.json
 .env
 .env.local
 .env.development.local

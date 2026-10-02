@@ -42,25 +42,30 @@ let _docClient = null;
 async function getClient() {
   if (_docClient) return _docClient;
 
-  let credentials;
+  // Section C: pass a credentials PROVIDER function so the SDK v3 re-calls it
+  // when credentials near expiry (guided by the `expiration` field).
+  const credentialsProvider = async () => {
+    const creds = await cognito.getIdentityCredentials();
+    return {
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
+      // The SDK uses this to know when to refresh
+      expiration: creds.expiration,
+    };
+  };
+
+  let resolvedCredentials;
   try {
-    credentials = await cognito.getIdentityCredentials();
+    resolvedCredentials = credentialsProvider;
   } catch (err) {
-    console.error('[dynamodb] getIdentityCredentials failed:', err.message);
-    credentials = undefined;
+    console.error('[dynamodb] credentials provider setup failed:', err.message);
+    resolvedCredentials = undefined;
   }
 
   const client = new DynamoDBClient({
     region: awsConfig.region,
-    ...(credentials
-      ? {
-          credentials: {
-            accessKeyId: credentials.accessKeyId,
-            secretAccessKey: credentials.secretAccessKey,
-            sessionToken: credentials.sessionToken,
-          },
-        }
-      : {}),
+    ...(resolvedCredentials ? { credentials: resolvedCredentials } : {}),
   });
 
   _docClient = DynamoDBDocumentClient.from(client, {

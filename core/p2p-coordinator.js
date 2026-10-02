@@ -10,6 +10,8 @@
 const http = require('http');
 const dgram = require('dgram');
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
 const tailscale = require('./tailscale');
 
 const HTTP_PORT = 44344;
@@ -98,114 +100,124 @@ class P2PCoordinator {
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-
-      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-
-      // GET /api/ping
-      if (req.method === 'GET' && url.pathname === '/api/ping') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          ok: true,
-          userId: this.localNode.userId,
-          displayName: this.localNode.displayName,
-          ip: this.localNode.ip,
-          port: HTTP_PORT,
-          isSharing: this.isSharing,
-          specs: this.localNode.specs,
-        }));
-        return;
-      }
-
-      // POST /api/cluster/request (Consumer requesting to join provider)
-      if (req.method === 'POST' && url.pathname === '/api/cluster/request') {
-        let body = '';
-        req.on('data', chunk => { body += chunk; });
-        req.on('end', () => {
-          try {
-            const data = JSON.parse(body);
-            if (!this.isSharing) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: 'Provider is not currently sharing resources.' }));
-              return;
-            }
-
-            console.log(`[P2P] Received cluster join request from ${data.consumerName || data.consumerId} (${data.consumerIp})`);
-            if (this.onRequestReceived) {
-              this.onRequestReceived(data);
-            }
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, status: 'RECEIVED' }));
-          } catch (e) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: false, error: e.message }));
-          }
-        });
-        return;
-      }
-
-      // POST /api/cluster/response (Provider accepted/declined join request)
-      if (req.method === 'POST' && url.pathname === '/api/cluster/response') {
-        let body = '';
-        req.on('data', chunk => { body += chunk; });
-        req.on('end', () => {
-          try {
-            const data = JSON.parse(body);
-            const pending = this.pendingSessionRequests.get(data.sessionId);
-            if (pending) {
-              clearTimeout(pending.timer);
-              this.pendingSessionRequests.delete(data.sessionId);
-              pending.resolve(data);
-            }
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
-          } catch (e) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: false, error: e.message }));
-          }
-        });
-        return;
-      }
-
-      // GET /api/workspace/files (Serve workspace files to provider)
-      if (req.method === 'GET' && url.pathname === '/api/workspace/files') {
-        const wsDir = this.activeWorkspace;
-        if (!wsDir || !fs.existsSync(wsDir)) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'No active workspace configured' }));
+      try {
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204);
+          res.end();
           return;
         }
 
-        try {
-          const files = {};
-          const entries = fs.readdirSync(wsDir, { withFileTypes: true });
-          for (const ent of entries) {
-            if (ent.isFile()) {
-              const fullPath = path.join(wsDir, ent.name);
-              const stats = fs.statSync(fullPath);
-              // Only sync files under 10MB
-              if (stats.size < 10 * 1024 * 1024) {
-                files[ent.name] = fs.readFileSync(fullPath).toString('base64');
+        const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+        // GET /api/ping
+        if (req.method === 'GET' && url.pathname === '/api/ping') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            userId: this.localNode.userId,
+            displayName: this.localNode.displayName,
+            ip: this.localNode.ip,
+            port: HTTP_PORT,
+            isSharing: this.isSharing,
+            specs: this.localNode.specs,
+          }));
+          return;
+        }
+
+        // POST /api/cluster/request (Consumer requesting to join provider)
+        if (req.method === 'POST' && url.pathname === '/api/cluster/request') {
+          let body = '';
+          req.on('data', chunk => { body += chunk; });
+          req.on('end', () => {
+            try {
+              const data = JSON.parse(body);
+              if (!this.isSharing) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'Provider is not currently sharing resources.' }));
+                return;
+              }
+
+              console.log(`[P2P] Received cluster join request from ${data.consumerName || data.consumerId} (${data.consumerIp})`);
+              if (this.onRequestReceived) {
+                this.onRequestReceived(data);
+              }
+
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, status: 'RECEIVED' }));
+            } catch (e) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+          });
+          return;
+        }
+
+        // POST /api/cluster/response (Provider accepted/declined join request)
+        if (req.method === 'POST' && url.pathname === '/api/cluster/response') {
+          let body = '';
+          req.on('data', chunk => { body += chunk; });
+          req.on('end', () => {
+            try {
+              const data = JSON.parse(body);
+              const pending = this.pendingSessionRequests.get(data.sessionId);
+              if (pending) {
+                clearTimeout(pending.timer);
+                this.pendingSessionRequests.delete(data.sessionId);
+                pending.resolve(data);
+              }
+
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true }));
+            } catch (e) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: e.message }));
+            }
+          });
+          return;
+        }
+
+        // GET /api/workspace/files (Serve workspace files to provider)
+        if (req.method === 'GET' && url.pathname === '/api/workspace/files') {
+          const wsDir = this.activeWorkspace;
+          if (!wsDir || !fs.existsSync(wsDir)) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'No active workspace configured' }));
+            return;
+          }
+
+          try {
+            const files = {};
+            const entries = fs.readdirSync(wsDir, { withFileTypes: true });
+            for (const ent of entries) {
+              if (ent.isFile()) {
+                const fullPath = path.join(wsDir, ent.name);
+                const stats = fs.statSync(fullPath);
+                // Only sync files under 10MB
+                if (stats.size < 10 * 1024 * 1024) {
+                  files[ent.name] = fs.readFileSync(fullPath).toString('base64');
+                }
               }
             }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, files }));
+          } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: err.message }));
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, files }));
-        } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err.message }));
+          return;
         }
-        return;
-      }
 
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found' }));
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+      } catch (outerErr) {
+        // Safety net: ensure no request is ever left hanging
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+          }
+          res.end(JSON.stringify({ ok: false, error: outerErr.message }));
+        } catch (_) {}
+      }
     });
 
     return new Promise((resolve) => {

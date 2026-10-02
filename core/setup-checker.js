@@ -13,6 +13,7 @@ const path = require('path');
 const { app } = require('electron');
 
 const execAsync = promisify(exec);
+const k3sCluster = require('./k3s-cluster');
 
 /**
  * Checks if Docker Desktop is installed and the daemon is running.
@@ -120,12 +121,13 @@ async function installTailscale(onProgress) {
  * @returns {Promise<{docker: object, tailscale: object, k3sImage: object}>}
  */
 async function runAllChecks() {
-  const [docker, tailscale, k3sImage] = await Promise.all([
+  const [docker, tailscale, k3sImage, tailscaleImage] = await Promise.all([
     checkDocker(),
     checkTailscale(),
     checkK3sImage().catch(() => ({ pulled: false })),
+    k3sCluster.checkTailscaleImage().catch(() => ({ pulled: false })),
   ]);
-  return { docker, tailscale, k3sImage };
+  return { docker, tailscale, k3sImage, tailscaleImage };
 }
 
 module.exports = {
@@ -135,4 +137,7 @@ module.exports = {
   pullK3sImage,
   installTailscale,
   runAllChecks,
+  // Section E11: Tailscale image
+  checkTailscaleImage: k3sCluster.checkTailscaleImage,
+  pullTailscaleImage: k3sCluster.pullTailscaleImage,
 };

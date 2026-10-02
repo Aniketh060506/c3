@@ -16,6 +16,7 @@ export default function SetupBanner() {
   const [loading, setLoading] = useState(_cachedChecks === undefined);
   const [expanded, setExpanded] = useState(false);
   const [pulling, setPulling] = useState(false);
+  const [pullingTs, setPullingTs] = useState(false);
   const [installingTs, setInstallingTs] = useState(false);
   const [msg, setMsg] = useState('');
 
@@ -58,6 +59,26 @@ export default function SetupBanner() {
       setMsg('✗ ' + e.message);
     } finally {
       setPulling(false);
+    }
+  };
+
+  const pullTsImage = async () => {
+    setPullingTs(true);
+    setMsg('Pulling Tailscale sidecar image (~50MB)...');
+    try {
+      // pullTailscaleImage is exposed via setup:pull-ts-image when wired up,
+      // falling back to a generic notice for now.
+      if (window.c3?.pullTailscaleImage) {
+        const r = await window.c3.pullTailscaleImage();
+        setMsg(r?.ok ? '✓ Tailscale image pulled!' : '✗ Pull failed: ' + (r?.error || 'unknown'));
+        if (r?.ok) setTimeout(runChecks, 1500);
+      } else {
+        setMsg('Run: docker pull tailscale/tailscale:stable');
+      }
+    } catch (e) {
+      setMsg('✗ ' + e.message);
+    } finally {
+      setPullingTs(false);
     }
   };
 
@@ -131,6 +152,19 @@ export default function SetupBanner() {
       } : null,
     },
     {
+      key: 'tailscale-image',
+      icon: '🐳',
+      name: 'Tailscale Image',
+      status: checks.tailscaleImage?.pulled ? 'Ready' : 'Not Pulled',
+      version: 'tailscale:stable',
+      ok: checks.tailscaleImage?.pulled,
+      action: !checks.tailscaleImage?.pulled ? {
+        label: pullingTs ? 'Pulling...' : 'Pull Image',
+        fn: pullTsImage,
+        loading: pullingTs,
+      } : null,
+    },
+    {
       key: 'storage',
       icon: '⚡',
       name: 'Shared Storage',
@@ -181,7 +215,7 @@ export default function SetupBanner() {
 
           {allReady ? (
             <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100/60 px-2 py-0.5 rounded-full border border-emerald-300">
-              All 4 Active
+              All {items.length} Active
             </span>
           ) : (
             <span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">

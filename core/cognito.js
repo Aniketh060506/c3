@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 /**
  * core/cognito.js
  * AWS Cognito authentication module for C3.
@@ -128,7 +130,7 @@ async function login(email, password) {
   _tokens.userId = extractSubFromToken(result.IdToken);
   _tokens.email = extractEmailFromToken(result.IdToken);
 
-  return { userId: _tokens.userId, email: _tokens.email };
+  return { userId: _tokens.userId, email: _tokens.email, tokens: { ..._tokens } };
 }
 
 /**
@@ -226,6 +228,18 @@ function restoreSession(tokens) {
   }
 }
 
+// Optional callback invoked after a successful automatic token refresh.
+// Set by main.js so fresh tokens are persisted to c3_auth.json.
+let _onTokensRefreshed = null;
+
+/**
+ * Sets the callback that is invoked whenever tokens are refreshed automatically.
+ * @param {function|null} fn
+ */
+function setOnTokensRefreshed(fn) {
+  _onTokensRefreshed = typeof fn === 'function' ? fn : null;
+}
+
 async function refreshTokens() {
   if (!_tokens.refreshToken) throw new Error('No refresh token available');
   const tokenUrl = 'https://ap-south-11fuiqpnq2.auth.ap-south-1.amazoncognito.com/oauth2/token';
@@ -252,6 +266,10 @@ async function refreshTokens() {
     _tokens.userId = extractSubFromToken(_tokens.idToken);
     _tokens.email = extractEmailFromToken(_tokens.idToken);
     console.log('[cognito] ID token refreshed automatically.');
+    // Notify main.js so it can persist the new tokens
+    if (_onTokensRefreshed) {
+      try { _onTokensRefreshed({ ..._tokens }); } catch (_) {}
+    }
     return _tokens;
   }
   throw new Error(data.error || 'Failed to refresh tokens');
@@ -262,9 +280,38 @@ async function refreshTokens() {
  * the Cognito Identity Pool (Federated Identities).
  * @returns {Promise<{accessKeyId, secretAccessKey, sessionToken}>}
  */
+/**
+ * Decodes the exp claim from a JWT without verifying the signature.
+ * @param {string} token
+ * @returns {number} epoch seconds, or 0 on failure
+ */
+function _tokenExp(token) {
+  try {
+    const payload = token.split('.')[1];
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
+    return decoded.exp || 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function getIdentityCredentials(retryCount = 0) {
   if (!_tokens.idToken) {
     throw new Error('Not authenticated: no ID token available.');
+  }
+
+  // Proactively refresh if the idToken expires within 5 minutes
+  if (retryCount === 0 && _tokens.refreshToken) {
+    const exp = _tokenExp(_tokens.idToken);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (exp > 0 && exp - nowSec < 300) {
+      console.log('[cognito] idToken near expiry — proactively refreshing...');
+      try {
+        await refreshTokens();
+      } catch (refreshErr) {
+        console.warn('[cognito] Proactive refresh failed:', refreshErr.message);
+      }
+    }
   }
 
   const loginsKey = `cognito-idp.${awsConfig.region}.amazonaws.com/${awsConfig.userPoolId}`;
@@ -294,6 +341,7 @@ async function getIdentityCredentials(retryCount = 0) {
       accessKeyId: creds.AccessKeyId,
       secretAccessKey: creds.SecretKey,
       sessionToken: creds.SessionToken,
+      expiration: creds.Expiration,
     };
   } catch (err) {
     if (err.message && err.message.includes('expired') && retryCount === 0 && _tokens.refreshToken) {
@@ -353,6 +401,8 @@ module.exports = {
   getEmail,
   getCredentials,
   restoreSession,
+  refreshTokens,
   getIdentityCredentials,
   exchangeCodeForTokens,
+  setOnTokensRefreshed,
 };

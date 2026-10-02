@@ -192,6 +192,8 @@ contextBridge.exposeInMainWorld('c3', {
   checkSetup: () => ipcRenderer.invoke('setup:check'),
   pullK3sImage: () => ipcRenderer.invoke('setup:pull-k3s'),
   installTailscale: () => ipcRenderer.invoke('setup:install-tailscale'),
+  // Section E11: pull Tailscale Docker sidecar image
+  pullTailscaleImage: () => ipcRenderer.invoke('setup:pull-tailscale-image'),
   openExternal: (url) => ipcRenderer.invoke('system:open-external', url),
   launchDocker: () => ipcRenderer.invoke('system:launch-docker'),
   getNetworkDebug: () => ipcRenderer.invoke('cluster:network-debug'),
@@ -204,6 +206,12 @@ contextBridge.exposeInMainWorld('c3', {
     const handler = (_event, msg) => callback(msg);
     ipcRenderer.on('setup:pull-k3s-progress', handler);
     return () => ipcRenderer.removeListener('setup:pull-k3s-progress', handler);
+  },
+  // Section E11
+  onTsPullProgress: (callback) => {
+    const handler = (_event, msg) => callback(msg);
+    ipcRenderer.on('setup:pull-ts-image-progress', handler);
+    return () => ipcRenderer.removeListener('setup:pull-ts-image-progress', handler);
   },
 
   // ── Mesh Settings ───────────────────────────────────────────────────────
