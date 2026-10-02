@@ -844,7 +844,7 @@ ipcMain.handle('cluster:create', async (_e, { providerIds, workspacePath }) => {
   // Issue 3: use masterRes.masterIp (Tailscale 100.x) as the authoritative master address
   const masterIp = masterRes.masterIp || hostIp;
   pushToRenderer('cluster:log', `✓ K3s master control plane active at ${masterIp}.`);
-  k3s.exportHostKubeconfig().catch(() => {});
+  k3s.exportHostKubeconfig(masterIp).catch(() => {});
 
   // Issue 3: now update DynamoDB with real masterIp and token so providers can connect
   if (!demoSessionUser) {

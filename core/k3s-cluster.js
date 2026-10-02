@@ -9,14 +9,16 @@
  *
  * Section E: Tailscale sidecar per K3s container for cross-machine networking.
  * Section E4: Solo mode (no Tailscale key) uses bridge mode, no sidecar.
+ *
+ * Bug fixes applied:
+ *  1. Shared execCapture() helper — all exec reads use demuxStream + once-guard.
+ *  2. Tailscale CLI inside sidecar containers uses --socket=/tmp/tailscaled.sock.
+ *  3. startTailscaleSidecar validates IP with regex; richer timeout error.
+ *  4. node-token pattern check; kubeconfig apiVersion guard; sidecar server URL fix.
  */
 
 const Docker = require('dockerode');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-
 const os = require('os');
-const execAsync = promisify(exec);
 
 const K3S_IMAGE = 'c3-k3s:latest';
 const FALLBACK_K3S_IMAGE = 'rancher/k3s:v1.30.0-k3s1';
@@ -26,6 +28,9 @@ const WORKER_CONTAINER_NAME = 'c3-k3s-worker';
 const MASTER_TS_CONTAINER_NAME = 'c3-ts-master';
 const WORKER_TS_CONTAINER_NAME = 'c3-ts-worker';
 const K3S_API_PORT = 6443;
+
+// Fix 2: socket path used by the Tailscale CLI inside official tailscale/tailscale containers
+const TS_SOCKET = '/tmp/tailscaled.sock';
 
 let _docker = null;
 
@@ -40,11 +45,46 @@ function getDocker() {
   return _docker;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Fix 1: Shared exec-capture helper ─────────────────────────────────────
 /**
- * Pulls a Docker image if it's not already present locally.
- * @param {string} image
+ * Run a command inside a container and capture stdout + stderr via demuxStream.
+ * The `done` callback is guarded so it resolves exactly once even if both
+ * 'end' and setTimeout fire.
+ *
+ * @param {object} container  - Dockerode container object
+ * @param {string[]} cmd      - Command array
+ * @param {number} timeoutMs  - Max wait (default 10 s)
+ * @returns {Promise<{stdout: string, stderr: string, exitCode: number|null}>}
  */
+async function execCapture(container, cmd, timeoutMs = 10000) {
+  const docker = getDocker();
+  const ex = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+  const stream = await ex.start({ hijack: true, stdin: false });
+  return new Promise((resolve) => {
+    let out = '', err = '';
+    let settled = false;
+
+    docker.modem.demuxStream(
+      stream,
+      { write: (c) => { out += c.toString('utf8'); } },
+      { write: (c) => { err += c.toString('utf8'); } }
+    );
+
+    const done = async () => {
+      if (settled) return;
+      settled = true;
+      let exitCode = null;
+      try { exitCode = (await ex.inspect()).ExitCode; } catch (_) {}
+      resolve({ stdout: out.trim(), stderr: err.trim(), exitCode });
+    };
+
+    stream.on('end', done);
+    stream.on('error', done);
+    setTimeout(done, timeoutMs);
+  });
+}
+
+// ── Image helpers ──────────────────────────────────────────────────────────
 async function ensureImage(image = K3S_IMAGE) {
   const docker = getDocker();
   try {
@@ -53,9 +93,7 @@ async function ensureImage(image = K3S_IMAGE) {
   } catch {
     try {
       await docker.getImage(FALLBACK_K3S_IMAGE).inspect();
-      try {
-        await docker.getImage(FALLBACK_K3S_IMAGE).tag({ repo: 'c3-k3s', tag: 'latest' });
-      } catch (_) {}
+      try { await docker.getImage(FALLBACK_K3S_IMAGE).tag({ repo: 'c3-k3s', tag: 'latest' }); } catch (_) {}
       return FALLBACK_K3S_IMAGE;
     } catch {
       console.log(`[k3s] Pulling image ${FALLBACK_K3S_IMAGE}...`);
@@ -69,18 +107,12 @@ async function ensureImage(image = K3S_IMAGE) {
         });
       });
       console.log(`[k3s] Image pulled: ${FALLBACK_K3S_IMAGE}`);
-      try {
-        await docker.getImage(FALLBACK_K3S_IMAGE).tag({ repo: 'c3-k3s', tag: 'latest' });
-      } catch (_) {}
+      try { await docker.getImage(FALLBACK_K3S_IMAGE).tag({ repo: 'c3-k3s', tag: 'latest' }); } catch (_) {}
       return FALLBACK_K3S_IMAGE;
     }
   }
 }
 
-/**
- * Section E11: Ensure Tailscale sidecar image is present.
- * Follows the same pattern as ensureImage.
- */
 async function ensureTailscaleImage() {
   const docker = getDocker();
   try {
@@ -101,96 +133,65 @@ async function ensureTailscaleImage() {
   }
 }
 
-/**
- * Removes a container by name immediately with SIGKILL if it exists.
- * Does not wait for a 5-second graceful shutdown timeout.
- * @param {string} name
- */
 async function removeContainerIfExists(name) {
   const docker = getDocker();
   try {
     const container = docker.getContainer(name);
     await container.remove({ force: true, v: true });
     console.log(`[k3s] Force-removed container: ${name}`);
-  } catch (err) {
-    // Container doesn't exist or already removed — fine
-  }
+  } catch (_) {}
 }
 
+// ── Fix 1 applied: waitForNodeReady uses execCapture ──────────────────────
 /**
- * Section E5: Waits until the K3s node named `nodeName` shows exactly "True" in
- * the Ready condition. Polls every 2s.
- * @param {object} masterContainer - Dockerode container object.
+ * Polls until the named K3s node shows exactly "True" in its Ready condition.
+ * @param {object} masterContainer
  * @param {string} nodeName
  * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
  */
 async function waitForNodeReady(masterContainer, nodeName, timeoutMs = 180000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const execObj = await masterContainer.exec({
-        Cmd: ['kubectl', 'get', 'node', nodeName,
+      const { stdout } = await execCapture(
+        masterContainer,
+        ['kubectl', 'get', 'node', nodeName,
           '-o', `jsonpath={.status.conditions[?(@.type=="Ready")].status}`,
           '--request-timeout=3s'],
-        AttachStdout: true,
-        AttachStderr: true,
-      });
-      const stream = await execObj.start({ hijack: true, stdin: false });
-      const output = await new Promise((resolve) => {
-        let buf = '';
-        stream.on('data', (chunk) => (buf += chunk.toString()));
-        stream.on('end', () => resolve(buf.trim()));
-        stream.on('error', () => resolve(''));
-        setTimeout(() => resolve(buf.trim()), 4000);
-      });
-      const ready = output.replace(/['"]/g, '').trim();
-      if (ready === 'True') {
+        5000
+      );
+      if (stdout.replace(/['"]/g, '').trim() === 'True') {
         console.log(`[k3s] Node ${nodeName} is Ready.`);
         return true;
       }
-    } catch {
-      // Not ready yet
-    }
+    } catch (_) {}
     await new Promise((r) => setTimeout(r, 2000));
   }
   return false;
 }
 
 /**
- * Section E5: Waits until the K3s API server reports c3-control-plane Ready.
- * Uses the exact condition check instead of string-matching output that could
- * falsely match "NotReady".
- * @param {object} container - Dockerode container object.
- * @param {number} timeoutMs
+ * Waits until c3-control-plane shows Ready. No artificial outer timeout —
+ * waitForNodeReady handles it.
  */
-async function waitForK3sReady(container, timeoutMs = 120000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const ready = await waitForNodeReady(container, 'c3-control-plane', 5000);
-      if (ready) {
-        console.log('[k3s] Cluster is ready.');
-        return;
-      }
-    } catch {
-      // Not ready yet
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  throw new Error('K3s master did not become ready within timeout.');
+async function waitForK3sReady(container, timeoutMs = 300000) {
+  const ready = await waitForNodeReady(container, 'c3-control-plane', timeoutMs);
+  if (!ready) throw new Error('K3s master did not become ready within timeout.');
+  console.log('[k3s] Cluster is ready.');
 }
 
+// ── Fix 2+3: Tailscale sidecar startup ────────────────────────────────────
 /**
- * Section E1: Starts a Tailscale sidecar container.
- * @param {{ name: string, hostname: string, authKey: string }} opts
- * @returns {Promise<string>} The 100.x Tailscale IP.
+ * Starts a Tailscale sidecar container and returns its 100.x IP.
+ * Fix 2: CLI args include --socket=/tmp/tailscaled.sock.
+ * Fix 3: IP validated with regex; timeout error includes stderr + last 15 log lines.
  */
 async function startTailscaleSidecar({ name, hostname, authKey }) {
   await ensureTailscaleImage();
   const docker = getDocker();
   await removeContainerIfExists(name);
 
-  // Sanitize hostname (Tailscale hostnames must be lowercase alphanumeric+dash)
   const safeHostname = hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 63);
   const volName = `${name}-state`;
 
@@ -203,6 +204,8 @@ async function startTailscaleSidecar({ name, hostname, authKey }) {
       `TS_STATE_DIR=/var/lib/tailscale`,
       `TS_USERSPACE=false`,
       `TS_EXTRA_ARGS=--accept-routes`,
+      // Fix 2: pin the socket path so the CLI knows where to find tailscaled
+      `TS_SOCKET=${TS_SOCKET}`,
     ],
     HostConfig: {
       Privileged: true,
@@ -216,42 +219,59 @@ async function startTailscaleSidecar({ name, hostname, authKey }) {
   await container.start();
   console.log(`[k3s] Tailscale sidecar "${name}" started.`);
 
-  // Poll for 100.x IP (up to 60s)
+  // Fix 2+3: use correct socket path; validate IP with regex
+  const TS_IP_RE = /^100\.\d+\.\d+\.\d+$/;
   const deadline = Date.now() + 60000;
+  let lastStderr = '';
+
   while (Date.now() < deadline) {
     try {
-      const execObj = await container.exec({
-        Cmd: ['tailscale', 'ip', '-4'],
-        AttachStdout: true,
-        AttachStderr: true,
-      });
-      const stream = await execObj.start({ hijack: true, stdin: false });
-      const output = await new Promise((resolve) => {
+      // Fix 2: --socket arg
+      const { stdout, stderr } = await execCapture(
+        container,
+        ['tailscale', `--socket=${TS_SOCKET}`, 'ip', '-4'],
+        4000
+      );
+      if (stderr) lastStderr = stderr;
+      // Fix 3: validate each line with regex
+      const ip = stdout.split('\n').map(l => l.trim()).find(l => TS_IP_RE.test(l));
+      if (ip) {
+        console.log(`[k3s] Tailscale sidecar "${name}" got IP: ${ip}`);
+        return ip;
+      }
+    } catch (e) {
+      lastStderr = e.message || lastStderr;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  // Fix 3: include stderr and last 15 log lines in the error message
+  let logTail = '';
+  try {
+    const logBuf = await new Promise((resolve, reject) => {
+      container.logs({ stdout: true, stderr: true, tail: 15 }, (err, stream) => {
+        if (err) return reject(err);
         let buf = '';
-        stream.on('data', chunk => (buf += chunk.toString()));
+        stream.on('data', (d) => { buf += d.toString('utf8'); });
         stream.on('end', () => resolve(buf.trim()));
-        stream.on('error', () => resolve(''));
+        stream.on('error', reject);
         setTimeout(() => resolve(buf.trim()), 3000);
       });
-      const ip = output.split('\n').find(l => l.trim().startsWith('100.'));
-      if (ip) {
-        console.log(`[k3s] Tailscale sidecar "${name}" got IP: ${ip.trim()}`);
-        return ip.trim();
-      }
-    } catch (_) {}
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  throw new Error(`Tailscale sidecar "${name}" did not get a 100.x IP within 60 seconds.`);
+    });
+    logTail = logBuf;
+  } catch (_) {}
+
+  throw new Error(
+    `Tailscale sidecar "${name}" did not get a 100.x IP within 60 seconds.\n` +
+    `Last stderr: ${lastStderr || '(empty)'}\n` +
+    `Container logs (last 15):\n${logTail || '(none)'}`
+  );
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
 /**
- * Section E2: Starts a K3s master (server) node in Docker.
- * If tailscaleAuthKey is provided, starts a Tailscale sidecar first and uses
- * container network mode. Otherwise (E4 solo mode), uses bridge mode.
- *
- * @param {{meshIp: string, clusterToken: string, localWorkspacePath: string, tailscaleAuthKey?: string}} opts
- * @returns {Promise<{containerId: string, clusterToken: string, masterIp: string}>}
+ * Starts the K3s master (server) node.
+ * Fix 4: node-token validated; kubeconfig export uses masterTsIp in sidecar mode.
  */
 async function startMasterNode({ meshIp, clusterToken, localWorkspacePath, tailscaleAuthKey }) {
   const resolvedImage = await ensureImage(K3S_IMAGE);
@@ -275,7 +295,6 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath, tails
   let usesSidecar = false;
 
   if (tailscaleAuthKey && tailscaleAuthKey.startsWith('tskey-')) {
-    // Section E2: start sidecar, use container network mode
     console.log('[k3s] Starting Tailscale sidecar for master...');
     masterTsIp = await startTailscaleSidecar({
       name: MASTER_TS_CONTAINER_NAME,
@@ -284,7 +303,6 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath, tails
     });
     usesSidecar = true;
   } else {
-    // Section E4: solo mode — use consumer's mesh IP or fall back to container IP
     masterTsIp = meshIp;
   }
 
@@ -297,7 +315,6 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath, tails
   ];
 
   if (usesSidecar) {
-    // Section E2: Tailscale sidecar provides the IP inside the container network
     k3sCmd.push(
       '--node-ip=' + masterTsIp,
       '--advertise-address=' + masterTsIp,
@@ -306,7 +323,6 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath, tails
       '--flannel-iface=tailscale0'
     );
   } else {
-    // Section E4: solo mode — let k3s pick the container IP; only add TLS SANs
     k3sCmd.push(
       '--tls-san=' + masterTsIp,
       '--tls-san=127.0.0.1',
@@ -324,11 +340,8 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath, tails
   };
 
   if (usesSidecar) {
-    // Section E2: share network namespace with the sidecar
-    // No PortBindings allowed with container network mode
     hostConfig.NetworkMode = `container:${MASTER_TS_CONTAINER_NAME}`;
   } else {
-    // Section E4: bridge mode, publish K3s API port
     hostConfig.PortBindings = {
       [`${K3S_API_PORT}/tcp`]: [{ HostPort: String(K3S_API_PORT) }],
     };
@@ -345,41 +358,32 @@ async function startMasterNode({ meshIp, clusterToken, localWorkspacePath, tails
   await container.start();
   console.log('[k3s] Master container started:', container.id);
 
-  // Wait for the cluster to be healthy
   await waitForK3sReady(container);
 
-  // Read authoritative node token generated by K3s master
+  // Fix 1+4: use execCapture; validate token format
   let realToken = clusterToken;
   try {
-    const tokenExec = await container.exec({
-      Cmd: ['cat', '/var/lib/rancher/k3s/server/node-token'],
-      AttachStdout: true,
-      AttachStderr: false,
-    });
-    const stream = await tokenExec.start({ hijack: true, stdin: false });
-    const output = await new Promise((resolve) => {
-      let buf = '';
-      stream.on('data', (chunk) => (buf += chunk.toString()));
-      stream.on('end', () => resolve(buf.trim()));
-      stream.on('error', () => resolve(''));
-      setTimeout(() => resolve(buf.trim()), 3000);
-    });
-    if (output && output.length > 5) {
-      realToken = output;
-      console.log('[k3s] Authoritative cluster token retrieved');
+    const { stdout: tokenOut } = await execCapture(
+      container,
+      ['cat', '/var/lib/rancher/k3s/server/node-token'],
+      5000
+    );
+    // Fix 4: token must match K10... format or equal the passed token
+    const K3S_TOKEN_RE = /^K10[0-9a-f]+::server:/;
+    if (tokenOut && (K3S_TOKEN_RE.test(tokenOut) || tokenOut === clusterToken)) {
+      realToken = tokenOut;
+      console.log('[k3s] Authoritative cluster token retrieved.');
+    } else if (tokenOut) {
+      console.warn('[k3s] Unexpected node-token format — falling back to generated token.');
     }
   } catch (_) {}
 
-  return { containerId: container.id, clusterToken: realToken, masterIp: masterTsIp };
+  return { containerId: container.id, clusterToken: realToken, masterIp: masterTsIp, usesSidecar };
 }
 
 /**
- * Section E3: Starts a K3s agent (worker) node in Docker.
- * If tailscaleAuthKey is provided, starts a Tailscale sidecar and uses container
- * network mode. Otherwise the node still joins but networking may be limited.
- *
- * @param {{masterMeshIp: string, clusterToken: string, gpuEnabled?: boolean, nodeName?: string, localWorkspacePath?: string, tailscaleAuthKey?: string}} opts
- * @returns {Promise<{containerId: string}>}
+ * Starts the K3s agent (worker) node.
+ * Fix 2: worker sidecar uses correct socket path.
  */
 async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false, localWorkspacePath, nodeName, tailscaleAuthKey }) {
   const resolvedImage = await ensureImage(K3S_IMAGE);
@@ -393,7 +397,6 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false,
     ? [{ Driver: 'nvidia', Count: -1, Capabilities: [['gpu']] }]
     : [];
 
-  // Use a dynamic node name so multiple worker laptops can join without name collisions!
   const targetNodeName = nodeName || `c3-worker-${os.hostname().toLowerCase().replace(/[^a-z0-9]/g, '')}`;
   const safeHostname = `c3-worker-${os.hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 40)}`;
 
@@ -414,7 +417,6 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false,
   let usesSidecar = false;
 
   if (tailscaleAuthKey && tailscaleAuthKey.startsWith('tskey-')) {
-    // Section E3: start worker sidecar
     console.log('[k3s] Starting Tailscale sidecar for worker...');
     workerTsIp = await startTailscaleSidecar({
       name: WORKER_TS_CONTAINER_NAME,
@@ -446,10 +448,8 @@ async function startWorkerNode({ masterMeshIp, clusterToken, gpuEnabled = false,
   };
 
   if (usesSidecar) {
-    // Section E3: share network namespace with the sidecar, no 'host' network
     hostConfig.NetworkMode = `container:${WORKER_TS_CONTAINER_NAME}`;
   }
-  // Note: no NetworkMode 'host' — removed per Section E3
 
   const container = await docker.createContainer({
     name: WORKER_CONTAINER_NAME,
@@ -472,27 +472,22 @@ let _nodesCacheTime = 0;
 let _nodesPendingPromise = null;
 
 /**
- * Section E10: Stops and removes all C3 cluster containers, including Tailscale sidecars.
- * Runs `tailscale logout` inside each sidecar before removing them.
+ * Stops all C3 cluster containers including Tailscale sidecars.
+ * Fix 2: tailscale logout uses correct socket arg.
  */
 async function stopCluster() {
   _nodesCache = null;
   _nodesCacheTime = 0;
   _nodesPendingPromise = null;
 
-  // Section E10: logout from Tailscale inside sidecars before removing
   const docker = getDocker();
   for (const tsName of [MASTER_TS_CONTAINER_NAME, WORKER_TS_CONTAINER_NAME]) {
     try {
       const tsContainer = docker.getContainer(tsName);
-      await tsContainer.inspect(); // check if exists
-      const logoutExec = await tsContainer.exec({
-        Cmd: ['tailscale', 'logout'],
-        AttachStdout: false,
-        AttachStderr: false,
-      });
-      await logoutExec.start({ hijack: true, stdin: false });
-      await new Promise(r => setTimeout(r, 1000)); // brief wait for logout
+      await tsContainer.inspect();
+      // Fix 2: --socket arg for tailscale logout inside the official image
+      await execCapture(tsContainer, ['tailscale', `--socket=${TS_SOCKET}`, 'logout'], 4000);
+      await new Promise((r) => setTimeout(r, 500));
     } catch (_) {}
   }
 
@@ -506,49 +501,30 @@ async function stopCluster() {
 }
 
 /**
- * Returns node information from the cluster via `kubectl get nodes -o json`
- * executed inside the master container.
- * Uses a 1.5s in-memory cache and Promise deduplication to avoid redundant Docker exec calls.
- * @param {boolean} [forceRefresh=false]
- * @returns {Promise<object[]>} Array of Kubernetes node objects.
+ * Returns Kubernetes node objects from kubectl get nodes.
+ * Fix 1: demuxStream already used here — kept, just routed via execCapture pattern.
  */
 async function getClusterNodes(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && _nodesCache && (now - _nodesCacheTime < 1500)) {
     return _nodesCache;
   }
-  if (_nodesPendingPromise) {
-    return _nodesPendingPromise;
-  }
+  if (_nodesPendingPromise) return _nodesPendingPromise;
 
   _nodesPendingPromise = (async () => {
     const docker = getDocker();
     try {
       const container = docker.getContainer(MASTER_CONTAINER_NAME);
-      const exec = await container.exec({
-        Cmd: ['kubectl', 'get', 'nodes', '-o', 'json', '--request-timeout=3s'],
-        AttachStdout: true,
-        AttachStderr: true,
-      });
-
-      const stream = await exec.start({ hijack: true, stdin: false });
-      const raw = await new Promise((resolve, reject) => {
-        let buf = '';
-        docker.modem.demuxStream(
-          stream,
-          { write: chunk => (buf += chunk.toString('utf8')) },
-          { write: () => {} }
-        );
-        stream.on('end', () => resolve(buf));
-        stream.on('error', reject);
-        setTimeout(() => resolve(buf), 6000);
-      });
-
-      const parsed = JSON.parse(raw);
+      const { stdout } = await execCapture(
+        container,
+        ['kubectl', 'get', 'nodes', '-o', 'json', '--request-timeout=3s'],
+        8000
+      );
+      const parsed = JSON.parse(stdout);
       _nodesCache = parsed.items || [];
       _nodesCacheTime = Date.now();
       return _nodesCache;
-    } catch (err) {
+    } catch (_) {
       return _nodesCache || [];
     } finally {
       _nodesPendingPromise = null;
@@ -558,34 +534,46 @@ async function getClusterNodes(forceRefresh = false) {
   return _nodesPendingPromise;
 }
 
-async function exportHostKubeconfig() {
+/**
+ * Reads k3s.yaml from the master container and writes it to ~/.kube/c3-config.yaml.
+ * Fix 1: uses execCapture (demuxStream, no raw stream.on('data') bug).
+ * Fix 4: validates content starts with "apiVersion:".
+ *        In sidecar mode, rewrites server address to https://<masterTsIp>:6443.
+ */
+async function exportHostKubeconfig(masterTsIp) {
   try {
     const fs = require('fs');
     const path = require('path');
     const docker = getDocker();
     const container = docker.getContainer(MASTER_CONTAINER_NAME);
-    const exec = await container.exec({
-      Cmd: ['cat', '/etc/rancher/k3s/k3s.yaml'],
-      AttachStdout: true,
-      AttachStderr: true,
-    });
-    const stream = await exec.start({ hijack: true, stdin: false });
-    const raw = await new Promise((resolve, reject) => {
-      let buf = '';
-      stream.on('data', chunk => (buf += chunk.toString('utf8')));
-      stream.on('end', () => resolve(buf));
-      stream.on('error', reject);
-      setTimeout(() => resolve(buf), 5000);
-    });
-    if (!raw.includes('clusters:')) return false;
 
-    const cleaned = raw.replace(/https:\/\/(0\.0\.0\.0|127\.0\.0\.1):6443/g, 'https://127.0.0.1:6443');
-    const kubeDir = path.join(os.homedir(), '.kube');
-    if (!fs.existsSync(kubeDir)) {
-      fs.mkdirSync(kubeDir, { recursive: true });
+    const { stdout: raw } = await execCapture(
+      container,
+      ['cat', '/etc/rancher/k3s/k3s.yaml'],
+      6000
+    );
+
+    // Fix 4: must start with "apiVersion:"
+    if (!raw.startsWith('apiVersion:')) {
+      console.warn('[k3s] exportHostKubeconfig: content does not look like a valid kubeconfig — skipping write.');
+      return false;
     }
+
+    // Fix 4: in sidecar mode use the actual Tailscale IP so `kubectl` works cross-machine
+    const serverAddr = masterTsIp && /^100\./.test(masterTsIp)
+      ? `https://${masterTsIp}:6443`
+      : 'https://127.0.0.1:6443';
+
+    const cleaned = raw.replace(
+      /https:\/\/(0\.0\.0\.0|127\.0\.0\.1|\d+\.\d+\.\d+\.\d+):6443/g,
+      serverAddr
+    );
+
+    const kubeDir = path.join(os.homedir(), '.kube');
+    if (!fs.existsSync(kubeDir)) fs.mkdirSync(kubeDir, { recursive: true });
     const c3Path = path.join(kubeDir, 'c3-config.yaml');
     fs.writeFileSync(c3Path, cleaned, 'utf8');
+    console.log(`[k3s] kubeconfig written to ${c3Path} (server: ${serverAddr})`);
     return true;
   } catch (e) {
     console.warn('[k3s] exportHostKubeconfig note:', e.message);
@@ -594,9 +582,8 @@ async function exportHostKubeconfig() {
 }
 
 /**
- * Section E8: Deploys a c3-runner DaemonSet (one runner per node) plus Redis.
- * Waits until the DaemonSet's numberReady equals desiredNumberScheduled.
- * The hostPath /workspace mount replaces kubectl cp.
+ * Deploys c3-runner DaemonSet + Redis.
+ * Fix 1: DaemonSet readiness poll uses execCapture.
  */
 async function deployDefaultPods() {
   const docker = getDocker();
@@ -663,41 +650,28 @@ spec:
     targetPort: 6379
 `;
     const b64 = Buffer.from(manifests).toString('base64');
-    const exec = await container.exec({
-      Cmd: ['/bin/sh', '-c', `echo "${b64}" | base64 -d > /tmp/c3-pods.yaml && kubectl apply -f /tmp/c3-pods.yaml`],
-      AttachStdout: true,
-      AttachStderr: true,
-    });
-    const stream = await exec.start({ hijack: true, stdin: false });
-    await new Promise((resolve) => {
-      stream.on('end', resolve);
-      stream.on('error', resolve);
-      setTimeout(resolve, 8000);
-    });
+    // Apply manifests — ignore output, only care about completion
+    await execCapture(
+      container,
+      ['/bin/sh', '-c', `echo "${b64}" | base64 -d > /tmp/c3-pods.yaml && kubectl apply -f /tmp/c3-pods.yaml`],
+      10000
+    );
     console.log('[k3s] c3-runner DaemonSet and redis applied — waiting for pods...');
 
-    // Section E8: wait until DaemonSet numberReady == desiredNumberScheduled (5 min timeout)
+    // Fix 1: use execCapture for DaemonSet poll
     const deadline = Date.now() + 300_000;
     let dsReady = false;
     let lastStatus = '';
     while (Date.now() < deadline) {
       try {
-        const dsExec = await container.exec({
-          Cmd: ['kubectl', 'get', 'daemonset', 'c3-runner',
+        const { stdout: dsOut } = await execCapture(
+          container,
+          ['kubectl', 'get', 'daemonset', 'c3-runner',
             '-o', 'jsonpath={.status.numberReady}/{.status.desiredNumberScheduled}',
             '--request-timeout=5s'],
-          AttachStdout: true,
-          AttachStderr: true,
-        });
-        const dsStream = await dsExec.start({ hijack: true, stdin: false });
-        const dsOut = await new Promise((resolve) => {
-          let buf = '';
-          dsStream.on('data', chunk => (buf += chunk.toString()));
-          dsStream.on('end', () => resolve(buf.trim()));
-          dsStream.on('error', () => resolve(''));
-          setTimeout(() => resolve(buf.trim()), 6000);
-        });
-        const [ready, desired] = dsOut.replace(/'/g, '').split('/').map(s => parseInt(s, 10));
+          7000
+        );
+        const [ready, desired] = dsOut.replace(/'/g, '').split('/').map((s) => parseInt(s, 10));
         if (!isNaN(ready) && !isNaN(desired) && desired > 0 && ready >= desired) {
           console.log(`[k3s] c3-runner DaemonSet ready: ${ready}/${desired}`);
           dsReady = true;
@@ -708,7 +682,7 @@ spec:
           lastStatus = dsOut;
         }
       } catch (_) {}
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 5000));
     }
     if (!dsReady) {
       console.warn('[k3s] c3-runner DaemonSet did not reach full readiness within 5 minutes — continuing anyway.');
@@ -718,10 +692,6 @@ spec:
   }
 }
 
-/**
- * Section E11: Checks if the Tailscale image is present.
- * @returns {Promise<{pulled: boolean}>}
- */
 async function checkTailscaleImage() {
   try {
     const docker = getDocker();
@@ -732,17 +702,13 @@ async function checkTailscaleImage() {
   }
 }
 
-/**
- * Section E11: Pulls the Tailscale image with progress callbacks.
- * @param {function} onProgress
- */
 async function pullTailscaleImage(onProgress) {
   return new Promise((resolve, reject) => {
     const { spawn } = require('child_process');
     const proc = spawn('docker', ['pull', TS_IMAGE]);
-    proc.stdout.on('data', d => onProgress && onProgress(d.toString().trim()));
-    proc.stderr.on('data', d => onProgress && onProgress(d.toString().trim()));
-    proc.on('close', code => {
+    proc.stdout.on('data', (d) => onProgress && onProgress(d.toString().trim()));
+    proc.stderr.on('data', (d) => onProgress && onProgress(d.toString().trim()));
+    proc.on('close', (code) => {
       if (code === 0) resolve();
       else reject(new Error('docker pull tailscale exited with code ' + code));
     });
