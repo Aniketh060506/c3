@@ -227,6 +227,7 @@ async function startSharing(userId, config = {}) {
               consumerName: data.consumerName || 'Peer Node',
               consumerIp: data.masterIp || req.socket.remoteAddress,
               masterIp: data.masterIp,
+              workerNodeIp: data.workerNodeIp,
               clusterToken: data.clusterToken || data.token,
               cores: data.cores || _config.cores,
               ramGb: data.ramGb || _config.ramGb,
@@ -323,6 +324,7 @@ async function startSharing(userId, config = {}) {
           consumerName: reqItem.consumerName || 'Cloud Peer',
           consumerIp: reqItem.masterIp,
           masterIp: reqItem.masterIp,
+          workerNodeIp: reqItem.workerNodeIp,
           clusterToken: reqItem.clusterToken,
           cores: reqItem.cores || _config.cores,
           ramGb: reqItem.ramGb || _config.ramGb,
@@ -340,13 +342,18 @@ async function startSharing(userId, config = {}) {
 // ── 2. Accept Session & Launch Privileged K3s Worker ─────────────────────────
 async function acceptSession(sessionData) {
   if (!_sharing) throw new Error('Provider sharing is not active.');
+  const { sessionId, masterIp, clusterToken, gpuEnabled } = sessionData;
+  // Older pending invitations did not persist workerNodeIp. Recover the
+  // provider's own address from the interface matching the consumer's route.
+  // A Tailscale master must pair with this provider's Tailscale address;
+  // otherwise use the LAN address advertised by this provider.
+  const workerNodeIp = sessionData.workerNodeIp ||
+    (isTailscalePeerAddress(masterIp) ? _config.tailscaleIp : _config.localIp);
   console.log('[provider] Validating provider session invitation.', {
-    sessionId: sessionData.sessionId,
-    masterIp: sessionData.masterIp,
-    workerNodeIp: sessionData.workerNodeIp,
+    sessionId,
+    masterIp,
+    workerNodeIp,
   });
-
-  const { sessionId, masterIp, clusterToken, gpuEnabled, workerNodeIp } = sessionData;
 
   // 1. Strict Input Sanitization & Format Validation (Prevent Command Injection)
   const ipRegex = /^[a-zA-Z0-9.-]+$/;
