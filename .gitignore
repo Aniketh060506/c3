@@ -1,0 +1,66 @@
+# ── Dependencies ──────────────────────────────────────────
+node_modules/
+.pnpm-store/
+.yarn/
+
+# ── Build & Distribution Outputs ──────────────────────────
+dist/
+dist-ui/
+release/
+build/
+out/
+.vite/
+
+# ── Credentials, Secrets & Local User State ───────────────
+aws-config.json
+c3_session.json
+c3_profile.json
+c3_ledger.json
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# ── Python Runtime & Cache ────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# ── Runtime & Workspace Mounts ────────────────────────────
+workspace/
+shared-workspace/
+*.tmp
+*.temp
+
+# ── Binaries & Large Archives ─────────────────────────────
+*.exe
+*.msi
+*.dmg
+*.deb
+*.rpm
+*.zip
+*.tar.gz
+*.7z
+
+# ── Logs & Debugging ──────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ── Operating System & IDE ────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
