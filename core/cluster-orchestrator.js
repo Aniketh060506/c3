@@ -339,13 +339,43 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
   const live = await hardware.getLiveStats();
 
   const clusterToken = `c3-token-${crypto.randomBytes(8).toString('hex')}`;
+  const remoteNodes = selectedNodes.filter(node => !node.isSelf && node.id !== 'self-node');
   const localNode = selectedNodes.find(node => node.isSelf || node.id === 'self-node');
   const localCores = Math.max(1, Number(localNode?.cores || Math.max(1, specs.cpuCores - 2)));
   const localRamGb = Math.max(1, Number(localNode?.ramGb || Math.max(1, Math.floor(specs.ramUsableGb - 4))));
   const tailscale = await setupChecker.checkTailscale();
-  const masterIp = tailscale.running ? tailscale.ip : live.network.ip;
+  // A K3s node has one advertised external address. Use one transport for the
+  // whole cluster instead of advertising Tailscale on the server while
+  // inviting LAN-only agents (which cannot route to that address).
+  let tailscaleTransport = remoteNodes.length > 0 && tailscale.running;
+  if (tailscaleTransport) {
+    for (const node of remoteNodes) {
+      if (!node.meshIp || await probeHostLatency(node.meshIp, 44344, 900) === null) {
+        tailscaleTransport = false;
+        break;
+      }
+    }
+  }
+  // VXLAN is used across both transports. Docker Desktop's WSL2 kernel on the
+  // supported Windows setup has VXLAN but no loadable WireGuard module; using
+  // wireguard-native unconditionally would make the provider CNI fail there.
+  const flannelBackend = 'vxlan';
+  const masterIp = tailscaleTransport ? tailscale.ip : live.network.ip;
   if (!masterIp || masterIp === 'Disconnected') {
     throw new Error('No reachable host address is available. Connect Tailscale or join a network before starting K3s.');
+  }
+  if (remoteNodes.length && !tailscaleTransport) {
+    const unreachable = [];
+    for (const node of remoteNodes) {
+      const lanIp = node.localIp || (node.source === 'lan' ? node.ip : null);
+      if (!lanIp || await probeHostLatency(lanIp, 44344, 900) === null) unreachable.push(node.hostname || node.id);
+      else node.clusterIp = lanIp;
+    }
+    if (unreachable.length) {
+      throw new Error(`Cannot start a shared cluster: every selected provider must be reachable on the same network using Tailscale or LAN. Unreachable: ${unreachable.join(', ')}. Start Provider → Start Sharing, check both machines are online, and allow TCP 44344 and TCP 6443 plus the selected Flannel UDP port through firewalls.`);
+    }
+  } else if (tailscaleTransport) {
+    for (const node of remoteNodes) node.clusterIp = node.meshIp;
   }
   const docker = await setupChecker.checkDocker();
   if (!docker.running) throw new Error('Docker Desktop Linux engine is not running. Start Docker Desktop, then retry.');
@@ -401,7 +431,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
     // Kubernetes services. `masterIp` is the Windows host address used by
     // remote agents and must only be the node's external address.
     `--node-external-ip=${masterIp}`,
-    '--flannel-backend=vxlan',
+    `--flannel-backend=${flannelBackend}`,
     '--flannel-external-ip',
     '--node-label', `c3.io/allocated-cores=${localCores}`,
     '--node-label', `c3.io/allocated-memory-gb=${localRamGb}`,
@@ -431,11 +461,13 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
   }
 
   if (!ready) {
-    throw new Error('K3s Master API server timed out after 30 seconds.');
+    const { stdout: logs } = await execAsync('docker logs --tail 60 c3-k3s-master').catch(() => ({ stdout: '' }));
+    const safeLogs = clusterToken ? logs.replaceAll(clusterToken, '[redacted]') : logs;
+    await execAsync('docker rm -f c3-k3s-master').catch(() => {});
+    throw new Error(`K3s control plane did not become Ready after 30 seconds.${safeLogs ? ` Recent container logs: ${safeLogs.trim()}` : ' Check Docker Desktop resources and container logs.'}`);
   }
 
   // 4. Dispatch invitations to remote Provider nodes
-  const remoteNodes = selectedNodes.filter(n => !n.isSelf && n.id !== 'self-node');
   const invitationResults = [];
   if (remoteNodes.length > 0) {
     notifyUI('cluster:status-update', { 
@@ -444,7 +476,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
     });
 
     for (const node of remoteNodes) {
-      const targetIp = node.connectionIp || node.meshIp || node.ip;
+      const targetIp = tailscaleTransport ? node.meshIp : (node.connectionIp || node.clusterIp || node.ip);
       const sessionId = `sess-${crypto.randomBytes(6).toString('hex')}`;
 
       const invitation = {
@@ -457,12 +489,13 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
         cores: node.cores,
         ramGb: node.ramGb,
         gpuEnabled: !!node.gpu,
-        workerNodeIp: node.connectionIp || node.meshIp || node.localIp || node.ip,
+        workerNodeIp: node.clusterIp || (tailscaleTransport ? node.meshIp : node.localIp || node.ip),
+        flannelBackend,
       };
 
       // Prefer a confirmed direct LAN/Tailscale endpoint. Use the cloud queue
       // only when the direct provider RPC did not acknowledge delivery.
-      const isTailscaleTransport = tailscale.running && node.meshIp && targetIp === node.meshIp;
+      const isTailscaleTransport = tailscaleTransport && node.meshIp && targetIp === node.meshIp;
       let chatAvailable = false;
       if (isTailscaleTransport) {
         try {
@@ -474,6 +507,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
             providerName: node.hostname,
             masterIp,
             workerNodeIp: invitation.workerNodeIp,
+            flannelBackend: invitation.flannelBackend,
             cores: node.cores,
             ramGb: node.ramGb,
             gpuEnabled: invitation.gpuEnabled,
@@ -501,6 +535,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
           masterIp,
           clusterToken,
           workerNodeIp: invitation.workerNodeIp,
+          flannelBackend: invitation.flannelBackend,
           cores: node.cores,
           ramGb: node.ramGb,
           status: 'PENDING',
@@ -522,8 +557,9 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
   }
 
   let joinedCount = 0;
-  if (remoteNodes.length > 0) {
-    for (let attempt = 0; attempt < 30; attempt++) {
+  const invitationDeliveryCount = invitationResults.filter(result => result.ok).length;
+  if (invitationDeliveryCount > 0) {
+    for (let attempt = 0; attempt < 60; attempt++) {
       await new Promise(r => setTimeout(r, 1500));
       try {
         const { stdout } = await execAsync('docker exec c3-k3s-master kubectl get nodes -o json');
@@ -535,7 +571,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
           const isReady = (node.status?.conditions || []).some(c => c.type === 'Ready' && c.status === 'True');
           return !isControlPlane && isReady;
         }).length;
-        if (joinedCount >= remoteNodes.length) break;
+        if (joinedCount >= invitationDeliveryCount) break;
       } catch (_) {}
     }
   }
@@ -553,11 +589,22 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
     workspacePath,
     selectedNodes,
     invitationResults,
-    tailscaleTransport: tailscale.running,
+    tailscaleTransport,
+    flannelBackend,
+    workerJoinStatus: {
+      expected: remoteNodes.length,
+      ready: joinedCount,
+      confirmed: joinedCount >= remoteNodes.length,
+      message: joinedCount >= remoteNodes.length
+        ? 'All selected remote workers are Ready in Kubernetes.'
+        : `${joinedCount} of ${remoteNodes.length} selected remote workers became Ready. Check Provider → session status, Docker worker logs, and network/firewall access.`,
+    },
     startTime: Date.now(),
   };
 
-  const statusMsg = joinedCount > 0
+  const statusMsg = remoteNodes.length > 0 && joinedCount < remoteNodes.length
+    ? `${joinedCount} of ${remoteNodes.length} selected provider(s) joined. The control plane is available, but the pooled cluster is incomplete; check provider acceptance and network/firewall connectivity.`
+    : joinedCount > 0
     ? `Cluster online! ${joinedCount} remote worker node(s) verified and joined.`
     : (remoteNodes.length > 0 
         ? `Local master online. Note: 0 of ${remoteNodes.length} remote nodes joined (running standalone).` 

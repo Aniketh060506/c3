@@ -512,10 +512,9 @@ export default function ProviderTab({ specs, dockerCapacity, user, onSwitchTab }
         </div>
       </div>
 
-      {/* ── Floating Incoming Session Invitation Modal ── */}
+      {/* Inline invitation card leaves the workspace accessible while responding. */}
       {incomingInvitation && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-md flex items-center justify-center p-6 animate-fadeIn">
-          <div className="bg-white rounded-[32px] p-7 max-w-lg w-full shadow-2xl border border-slate-200/90 space-y-5">
+        <section className="animate-fadeIn rounded-2xl border border-indigo-200 bg-white p-5 shadow-sm space-y-5">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="w-9 h-9 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold">
@@ -570,7 +569,7 @@ export default function ProviderTab({ specs, dockerCapacity, user, onSwitchTab }
                 onClick={() => setNegotiatingInvitation(incomingInvitation)}
                 className="px-4 py-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-bold rounded-2xl transition cursor-pointer"
               >
-                Chat / Negotiate
+                Open chat tab
               </button>
               <button
                 onClick={handleAcceptInvitation}
@@ -587,15 +586,20 @@ export default function ProviderTab({ specs, dockerCapacity, user, onSwitchTab }
                 Decline
               </button>
             </div>
-          </div>
-        </div>
+        </section>
       )}
       {negotiatingInvitation && (
-        <NegotiationChat
-          sessionId={negotiatingInvitation.sessionId}
-          counterpartyName={negotiatingInvitation.consumerName || 'Consumer'}
-          onClose={() => setNegotiatingInvitation(null)}
-        />
+        <section className="space-y-3" aria-label="Provider request chat">
+          <div role="tablist" aria-label="Incoming request views" className="flex gap-2 border-b border-slate-200 pb-2">
+            <button type="button" role="tab" aria-selected="false" onClick={() => setNegotiatingInvitation(null)} className="rounded-lg px-3 py-2 text-xs font-bold text-slate-500 hover:bg-white">Request</button>
+            <button type="button" role="tab" aria-selected="true" className="rounded-lg bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700">Chat</button>
+          </div>
+          <NegotiationChat
+            sessionId={negotiatingInvitation.sessionId}
+            counterpartyName={negotiatingInvitation.consumerName || 'Consumer'}
+            onClose={() => setNegotiatingInvitation(null)}
+          />
+        </section>
       )}
     </div>
   );

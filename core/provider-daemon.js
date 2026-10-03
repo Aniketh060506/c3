@@ -228,6 +228,7 @@ async function startSharing(userId, config = {}) {
               consumerIp: data.masterIp || req.socket.remoteAddress,
               masterIp: data.masterIp,
               workerNodeIp: data.workerNodeIp,
+              flannelBackend: data.flannelBackend,
               clusterToken: data.clusterToken || data.token,
               cores: data.cores || _config.cores,
               ramGb: data.ramGb || _config.ramGb,
@@ -325,6 +326,7 @@ async function startSharing(userId, config = {}) {
           consumerIp: reqItem.masterIp,
           masterIp: reqItem.masterIp,
           workerNodeIp: reqItem.workerNodeIp,
+          flannelBackend: reqItem.flannelBackend,
           clusterToken: reqItem.clusterToken,
           cores: reqItem.cores || _config.cores,
           ramGb: reqItem.ramGb || _config.ramGb,
@@ -343,6 +345,7 @@ async function startSharing(userId, config = {}) {
 async function acceptSession(sessionData) {
   if (!_sharing) throw new Error('Provider sharing is not active.');
   const { sessionId, masterIp, clusterToken, gpuEnabled } = sessionData;
+  const flannelBackend = sessionData.flannelBackend === 'wireguard-native' ? 'wireguard-native' : 'vxlan';
   // Older pending invitations did not persist workerNodeIp. Recover the
   // provider's own address from the interface matching the consumer's route.
   // A Tailscale master must pair with this provider's Tailscale address;
@@ -387,7 +390,7 @@ async function acceptSession(sessionData) {
     '--cap-add=NET_ADMIN',
     '--privileged',
     '--name', 'c3-k3s-worker',
-    '-p', '8472:8472/udp',
+    '-p', flannelBackend === 'wireguard-native' ? '51820:51820/udp' : '8472:8472/udp',
   ];
 
   if ((gpuEnabled ?? _config?.gpuEnabled)) {

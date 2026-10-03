@@ -66,6 +66,12 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
     let unsubStatus = null;
     if (window.c3?.onClusterStatusUpdate) {
       unsubStatus = window.c3.onClusterStatusUpdate((update) => {
+        if (update.step === 'INACTIVE') {
+          setLaunching(false);
+          setLaunchStep(null);
+          checkCluster();
+          return;
+        }
         setLaunchStep(update);
         if (update.step === 'ACTIVE') {
           setLaunching(false);
@@ -172,6 +178,7 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
       alert(`Cluster launch failed: ${err.message}`);
     } finally {
       setLaunching(false);
+      setLaunchStep(null);
     }
   };
 
@@ -274,30 +281,46 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
             </div>
             <span className="text-xs text-slate-500">{providerRequests.length} request(s)</span>
           </div>
-          <div className="divide-y divide-slate-100">
-            {providerRequests.map(request => {
-              const session = requestSessions[request.sessionId];
-              const status = session?.status || (request.ok ? 'SENT' : 'FAILED');
-              return (
-                <div key={request.sessionId || request.nodeId} className="py-3 flex flex-wrap items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="font-semibold text-sm text-slate-800">{request.hostname || request.nodeId || 'Provider'}</div>
-                    <div className="text-xs text-slate-500">{status.replaceAll('_', ' ')} · {request.channel === 'tailscale' ? 'Direct Tailscale' : request.channel === 'cloud' ? 'AWS request queue' : 'No delivery channel'}</div>
-                    {session?.agreedPriceCreditsPerHour != null && <div className="text-xs text-emerald-700 font-semibold mt-1">Quote agreed: {session.agreedPriceCreditsPerHour} test credits/hour · no settlement</div>}
+          {negotiatingRequest ? (
+            <>
+              <div role="tablist" aria-label="Provider request views" className="flex gap-2 border-b border-slate-100 pb-3">
+                <button type="button" role="tab" aria-selected="false" onClick={() => setNegotiatingRequest(null)} className="rounded-lg px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50">Requests</button>
+                <button type="button" role="tab" aria-selected="true" className="rounded-lg bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700">Chat · {negotiatingRequest.hostname || 'Provider'}</button>
+              </div>
+              <div role="tabpanel">
+                <NegotiationChat
+                  sessionId={negotiatingRequest.sessionId}
+                  counterpartyName={negotiatingRequest.hostname || 'Provider'}
+                  onClose={() => setNegotiatingRequest(null)}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {providerRequests.map(request => {
+                const session = requestSessions[request.sessionId];
+                const status = session?.status || (request.ok ? 'SENT' : 'FAILED');
+                return (
+                  <div key={request.sessionId || request.nodeId} className="py-3 flex flex-wrap items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-sm text-slate-800">{request.hostname || request.nodeId || 'Provider'}</div>
+                      <div className="text-xs text-slate-500">{status.replaceAll('_', ' ')} · {request.channel === 'tailscale' ? 'Direct Tailscale' : request.channel === 'cloud' ? 'AWS request queue' : 'No delivery channel'}</div>
+                      {session?.agreedPriceCreditsPerHour != null && <div className="text-xs text-emerald-700 font-semibold mt-1">Quote agreed: {session.agreedPriceCreditsPerHour} test credits/hour · no settlement</div>}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!request.chatAvailable}
+                      onClick={() => setNegotiatingRequest(request)}
+                      className="px-3.5 py-2 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-bold disabled:opacity-40"
+                      title={request.chatAvailable ? 'Open the persisted DynamoDB request chat' : 'Chat requires the AWS request record to be available'}
+                    >
+                      Open chat tab
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    disabled={!request.chatAvailable}
-                    onClick={() => setNegotiatingRequest(request)}
-                    className="px-3.5 py-2 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-bold disabled:opacity-40"
-                    title={request.chatAvailable ? 'Open the persisted DynamoDB request chat' : 'Chat requires the AWS request record to be available'}
-                  >
-                    Chat / Negotiate
-                  </button>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </section>
       )}
 
@@ -497,42 +520,39 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
               </button>
             </div>
           </div>
+          {clusterStatus.workerJoinStatus && !clusterStatus.workerJoinStatus.confirmed && (
+            <div role="status" className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+              <div className="font-bold">Remote cluster is incomplete</div>
+              <p className="mt-1">{clusterStatus.workerJoinStatus.message}</p>
+              {providerRequests.length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs">
+                  {providerRequests.map((request) => (
+                    <li key={request.sessionId}>
+                      <span className="font-semibold">{request.hostname || request.nodeId || 'Provider'}:</span>{' '}
+                      {request.error || request.message || (request.ok ? `Invitation sent via ${request.channel}; waiting for provider acceptance.` : 'Invitation was not delivered.')}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Launching Progress Modal ── */}
+      {/* Non-blocking launch status keeps the workspace and request chat usable. */}
       {launching && launchStep && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-md flex items-center justify-center p-6 animate-fadeIn">
-          <div className="bg-white rounded-[32px] p-8 max-w-md w-full shadow-2xl border border-slate-200/90 space-y-5 text-center">
-            <div className="w-14 h-14 rounded-3xl bg-indigo-50 text-indigo-600 flex items-center justify-center mx-auto shadow-soft">
-              <RotateCw className="w-7 h-7 animate-spin" />
+        <div className="fixed bottom-5 right-5 z-[70] w-[min(22rem,calc(100vw-2rem))] pointer-events-none animate-fadeIn">
+          <div role="status" aria-live="polite" className="pointer-events-auto rounded-2xl border border-indigo-200 bg-white/95 p-4 shadow-2xl backdrop-blur">
+            <div className="flex items-start gap-3">
+              <RotateCw className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-indigo-600" />
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-slate-900">Starting cluster</h3>
+                <p className="mt-1 text-xs leading-5 text-slate-600">{launchStep.message}</p>
+                <p className="mt-2 text-[10px] text-slate-400">You can keep using other tabs while this runs.</p>
+              </div>
             </div>
-
-            <div className="space-y-1">
-              <h3 className="text-lg font-black text-slate-900 font-display">
-                Deploying K3s Supercomputer
-              </h3>
-              <p className="text-xs text-indigo-700 font-mono font-bold">
-                {launchStep.message}
-              </p>
-            </div>
-
-            <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
-              <div className="bg-indigo-600 h-full w-2/3 animate-pulse rounded-full" />
-            </div>
-
-            <p className="text-[11px] text-slate-400">
-              Starting the K3s control plane and requesting direct connections to selected provider nodes.
-            </p>
           </div>
         </div>
-      )}
-      {negotiatingRequest && (
-        <NegotiationChat
-          sessionId={negotiatingRequest.sessionId}
-          counterpartyName={negotiatingRequest.hostname || 'Provider'}
-          onClose={() => setNegotiatingRequest(null)}
-        />
       )}
     </div>
   );
