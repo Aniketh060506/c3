@@ -427,12 +427,17 @@ ipcMain.handle('consumer:stop-cluster', async () => {
 });
 
 // ── IPC Handlers: Phase 5 Interactive Terminal ──
-ipcMain.handle('terminal:init', async (_e, target) => {
-  return await terminalManager.initTerminal(target);
+ipcMain.handle('terminal:init', async (_e, target, dimensions) => {
+  return await terminalManager.initTerminal(target, dimensions);
 });
 
 ipcMain.handle('terminal:write', (_e, data) => {
   terminalManager.write(data);
+  return { ok: true };
+});
+
+ipcMain.handle('terminal:resize', (_e, cols, rows) => {
+  terminalManager.resize(cols, rows);
   return { ok: true };
 });
 

@@ -2,6 +2,7 @@
 
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const crypto = require('crypto');
 const execFileAsync = promisify(execFile);
 
 async function kubectl(args, timeout = 20000) {
@@ -71,8 +72,26 @@ async function getPodProcesses({ namespace, pod, container } = {}) {
     const output = await kubectl(['exec', '-n', namespace, pod, '-c', container, '--', 'ps', '-eo', 'pid,ppid,comm,args']);
     return { ok: true, target, output: output.trim() || '(No process output)' };
   } catch (error) {
-    const fallback = await kubectl(['exec', '-n', namespace, pod, '-c', container, '--', 'ps']);
-    return { ok: true, target, output: fallback.trim() || '(No process output)', note: 'Detailed ps is unavailable in this image; showing its basic process list.' };
+    try {
+      const fallback = await kubectl(['exec', '-n', namespace, pod, '-c', container, '--', 'ps']);
+      return { ok: true, target, output: fallback.trim() || '(No process output)', note: 'Detailed ps is unavailable in this image; showing its basic process list.' };
+    } catch (_) {
+      try {
+        const debugName = `c3-proc-${crypto.randomBytes(4).toString('hex')}`;
+        const output = await kubectl([
+          'debug', '-i', '-n', namespace, pod,
+          '--image=busybox:1.36.1', '--target', container, '-c', debugName, '--', 'ps', '-ef',
+        ], 90000);
+        return {
+          ok: true,
+          target,
+          output: output.trim() || '(No process output)',
+          note: 'The application image has no ps binary. Process data came from a temporary BusyBox debug container targeting this container; that helper is separate from the application filesystem.',
+        };
+      } catch (debugError) {
+        throw new Error(`This container image has no usable ps command, and Kubernetes could not start a temporary debug container: ${debugError.message || error.message}`);
+      }
+    }
   }
 }
 

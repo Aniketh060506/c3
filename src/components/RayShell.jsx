@@ -66,6 +66,21 @@ export default function RayShell({ specs, onSwitchTab }) {
     { label: 'Recent events', cmd: 'kubectl get events -A --sort-by=.lastTimestamp\r\n', hint: 'Recent scheduling and startup issues' },
     { label: 'Master workspace', cmd: 'ls -la /workspace\r\n', hint: 'Selected folder mounted on the control plane' },
   ];
+  const podQuickCommands = [
+    { label: 'Working directory', cmd: 'pwd\r\n', hint: 'Current directory in this shell' },
+    { label: 'List files', cmd: 'ls -la\r\n', hint: 'Files visible in this container' },
+    { label: 'Processes', cmd: 'ps -ef\r\n', hint: 'Processes visible to this container' },
+    { label: 'Filesystem space', cmd: 'df -h\r\n', hint: 'Mounted filesystems and free space' },
+    { label: 'Environment', cmd: 'env\r\n', hint: 'Environment variables in this shell' },
+    { label: 'User and groups', cmd: 'id\r\n', hint: 'Current shell permissions' },
+  ];
+  const debugQuickCommands = [
+    { label: 'Target processes', cmd: 'ps -ef\r\n', hint: 'Processes visible through the target namespace' },
+    { label: 'Target root files', cmd: 'ls -la /proc/1/root\r\n', hint: 'Try the target process filesystem via /proc' },
+    { label: 'Target command', cmd: 'cat /proc/1/cmdline\r\n', hint: 'Command line for PID 1, if visible' },
+    { label: 'Target mounts', cmd: 'cat /proc/1/mountinfo\r\n', hint: 'Mounts for PID 1, if visible' },
+    { label: 'Helper filesystem', cmd: 'ls -la\r\n', hint: 'Files in the temporary Ubuntu helper' },
+  ];
 
   // 1. Load initial Ray templates & status
   useEffect(() => {
@@ -192,6 +207,7 @@ export default function RayShell({ specs, onSwitchTab }) {
     term.loadAddon(fit);
     term.open(terminalRef.current);
     fit.fit();
+    window.c3?.resizeTerminal?.(term.cols, term.rows);
 
     termInstance.current = term;
     fitAddon.current = fit;
@@ -213,7 +229,7 @@ export default function RayShell({ specs, onSwitchTab }) {
     }
 
     if (window.c3?.initTerminal) {
-      window.c3.initTerminal(terminalTargetSpec)
+      window.c3.initTerminal(terminalTargetSpec, { cols: term.cols, rows: term.rows })
         .then(result => {
           shellReady = Boolean(result?.ok);
           setTerminalReady(shellReady);
@@ -227,6 +243,7 @@ export default function RayShell({ specs, onSwitchTab }) {
     const resizeObserver = new ResizeObserver(() => {
       try {
         fit.fit();
+        window.c3?.resizeTerminal?.(term.cols, term.rows);
       } catch (_) {}
     });
     resizeObserver.observe(terminalRef.current);
@@ -311,7 +328,7 @@ export default function RayShell({ specs, onSwitchTab }) {
       termInstance.current.write('\x1b[38;5;141mRestarting shell session...\x1b[0m\r\n');
     }
     if (window.c3?.initTerminal) {
-      window.c3.initTerminal(terminalTargetSpec).then(result => {
+      window.c3.initTerminal(terminalTargetSpec, { cols: termInstance.current?.cols, rows: termInstance.current?.rows }).then(result => {
         setTerminalReady(Boolean(result?.ok));
         setTerminalTarget(result?.target || 'Shell');
         setTerminalKind(result?.kind || 'cluster');
@@ -327,6 +344,21 @@ export default function RayShell({ specs, onSwitchTab }) {
 
   const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) || templates[0];
   const jobIsRunning = ['RUNNING', 'DOWNLOADING_RESULTS'].includes(activeJob?.status);
+  const visibleQuickCommands = terminalKind === 'cluster'
+    ? quickCommands
+    : terminalKind === 'pod-debug' ? debugQuickCommands : terminalKind === 'node-debug'
+      ? [
+        { label: 'Node files', cmd: 'ls -la /host\r\n', hint: 'List the selected node filesystem' },
+        { label: 'Node processes', cmd: 'ps -ef\r\n', hint: 'Processes visible to the debug container' },
+        { label: 'Disk space', cmd: 'df -h /host\r\n', hint: 'Node filesystem capacity' },
+        { label: 'Network interfaces', cmd: 'ip addr\r\n', hint: 'Interfaces visible to the helper' },
+      ] : terminalKind === 'local'
+        ? [
+          { label: 'List files', cmd: 'Get-ChildItem\r', hint: 'Files in the current PowerShell directory' },
+          { label: 'Current path', cmd: 'Get-Location\r', hint: 'Show the current directory' },
+          { label: 'Running processes', cmd: 'Get-Process\r', hint: 'List local Windows processes' },
+          { label: 'Docker status', cmd: 'docker ps\r', hint: 'Check local containers' },
+        ] : podQuickCommands;
 
   const handleOpenResults = async () => {
     try {
@@ -821,12 +853,12 @@ export default function RayShell({ specs, onSwitchTab }) {
                 <span className="w-3 h-3 rounded-full bg-amber-500/80 inline-block shrink-0" />
                 <span className="w-3 h-3 rounded-full bg-emerald-500/80 inline-block shrink-0" />
                 <span className="truncate text-xs font-mono text-slate-400 ml-2">
-                  {terminalTarget}{terminalKind === 'pod' ? ' · pod shell' : ' · cluster shell'}
+                  {terminalTarget}{terminalKind === 'pod' || terminalKind === 'pod-debug' ? ' · pod shell' : terminalKind === 'node-debug' ? ' · node shell' : terminalKind === 'local' ? ' · local shell' : ' · cluster shell'}
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-3">
-                <span className="hidden sm:block text-[11px] font-mono text-slate-500">Pipe shell · no TTY</span>
-                <button type="button" onClick={handleRestartShell} className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-700 text-slate-400 hover:bg-slate-800 hover:text-white" title="Restart shell session" aria-label="Restart shell session">
+                <span className="hidden sm:block text-[11px] font-mono text-slate-500">ConPTY · interactive</span>
+                <button type="button" onClick={handleRestartShell} disabled={terminalKind === 'pod-debug' || terminalKind === 'node-debug'} className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-700 text-slate-400 hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" title={terminalKind.endsWith('-debug') ? 'Kubernetes retains this ephemeral debug container until its pod is removed' : 'Restart shell session'} aria-label="Restart shell session">
                   <RotateCw className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -834,9 +866,15 @@ export default function RayShell({ specs, onSwitchTab }) {
             <div ref={terminalRef} className="flex-1 w-full overflow-hidden" style={{ minHeight: '380px' }} />
             <div className="pt-2 text-[11px] text-slate-400">
               {terminalReady
-                ? terminalKind === 'pod'
-                  ? 'Commands run inside this pod. This pipe shell has no TTY or job control; use it for shell commands, not full-screen editors.'
-                  : 'Commands run on the K3s control plane. Use Nodes & Pods to inspect processes or open a shell in a specific pod.'
+                ? terminalKind === 'pod-debug'
+                  ? 'Temporary Ubuntu/Bash container targets the selected container process namespace. Its filesystem is separate; use /proc/<PID>/root where exposed. Kubernetes retains its record until this pod is recreated.'
+                  : terminalKind === 'node-debug'
+                  ? 'Temporary privileged Ubuntu/Bash debug container. The selected node filesystem is available at /host; this is separate from application pods.'
+                  : terminalKind === 'pod'
+                  ? 'Commands run inside the selected app container with a real TTY, signal handling, terminal resize, and interactive job control.'
+                  : terminalKind === 'local'
+                  ? 'Commands run in local Windows PowerShell.'
+                  : 'Commands run on the K3s control plane. Use Nodes & Pods to inspect pods or open a node shell.'
                 : 'Connecting to the cluster shell…'}
             </div>
           </div>
@@ -845,19 +883,19 @@ export default function RayShell({ specs, onSwitchTab }) {
             <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
               <TerminalIcon className="h-4 w-4 text-indigo-600" />
               <div>
-                <h2 className="text-sm font-black text-slate-900">Quick commands</h2>
-                <p className="text-[10px] text-slate-500">Click to run in the terminal</p>
+                <h2 className="text-sm font-black text-slate-900">{terminalKind === 'cluster' ? 'Quick commands' : terminalKind === 'node-debug' ? 'Node commands' : terminalKind === 'local' ? 'PowerShell commands' : 'Pod commands'}</h2>
+                <p className="text-[10px] text-slate-500">Click to run in the current shell</p>
               </div>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 xl:grid-cols-1">
-              {quickCommands.map(qc => (
-                <button key={qc.label} type="button" onClick={() => handleRunCommand(qc.cmd)} disabled={!terminalReady || terminalKind !== 'cluster'} title={qc.cmd.trim()} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-left transition hover:border-indigo-300 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-45">
+              {visibleQuickCommands.map(qc => (
+                <button key={qc.label} type="button" onClick={() => handleRunCommand(qc.cmd)} disabled={!terminalReady} title={qc.cmd.trim()} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-left transition hover:border-indigo-300 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-45">
                   <span className="block text-xs font-bold text-slate-800">{qc.label}</span>
                   <span className="mt-0.5 block text-[10px] leading-4 text-slate-500">{qc.hint}</span>
                 </button>
               ))}
             </div>
-            <p className="mt-3 border-t border-slate-100 pt-3 text-[10px] leading-4 text-slate-500">Shortcuts are read-only. “Master workspace” lists the folder on the control plane; it does not prove a provider has a live shared mount.</p>
+            <p className="mt-3 border-t border-slate-100 pt-3 text-[10px] leading-4 text-slate-500">{terminalKind === 'cluster' ? 'Shortcuts are read-only. “Master workspace” lists the folder on the control plane; it does not prove a provider has a live shared mount.' : terminalKind === 'pod-debug' ? 'A temporary Ubuntu helper is used because the app image has no shell. The target root is visible only if the runtime exposes it through /proc.' : terminalKind === 'node-debug' ? 'Node shell uses a temporary privileged debug container; the node filesystem is at /host.' : terminalKind === 'local' ? 'Shortcuts run in local Windows PowerShell.' : 'Shortcuts run inside the selected application container.'}</p>
           </aside>
         </div>
       )}

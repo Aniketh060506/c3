@@ -64,10 +64,13 @@ export default function ClusterExplorer({ onOpenPodShell }) {
         {error && <div className="mt-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><CircleAlert size={17} className="mt-0.5 shrink-0" />{error}</div>}
         <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {inventory.nodes.map(node => (
-            <button key={node.name} onClick={() => setNodeFilter(node.name === nodeFilter ? 'all' : node.name)} className={`rounded-xl border p-4 text-left transition ${nodeFilter === node.name ? 'border-indigo-400 bg-indigo-50/60 ring-2 ring-indigo-100' : 'border-slate-200 bg-slate-50 hover:border-slate-300'}`}>
-              <div className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-2 font-bold text-slate-900"><Server size={16} className="shrink-0 text-indigo-600" /><span className="truncate">{node.name}</span></span><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${node.ready ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{node.ready ? 'READY' : 'NOT READY'}</span></div>
-              <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500"><span>{node.role}</span><span>{node.podCount} pods</span><span>{node.cpu} CPU</span></div>
-            </button>
+            <div key={node.name} className={`rounded-xl border p-4 transition ${nodeFilter === node.name ? 'border-indigo-400 bg-indigo-50/60 ring-2 ring-indigo-100' : 'border-slate-200 bg-slate-50 hover:border-slate-300'}`}>
+              <button onClick={() => setNodeFilter(node.name === nodeFilter ? 'all' : node.name)} className="w-full text-left">
+                <div className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-2 font-bold text-slate-900"><Server size={16} className="shrink-0 text-indigo-600" /><span className="truncate">{node.name}</span></span><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${node.ready ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{node.ready ? 'READY' : 'NOT READY'}</span></div>
+                <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500"><span>{node.role}</span><span>{node.podCount} pods</span><span>{node.cpu} CPU</span></div>
+              </button>
+              <button disabled={!node.ready} onClick={() => onOpenPodShell({ kind: 'node', node: node.name })} className="mt-3 flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40" title="Opens a temporary privileged debug shell for node administration"><Terminal size={13} /> Node shell</button>
+            </div>
           ))}
           {inventory.nodes.length > 0 && <button onClick={() => setNodeFilter('all')} className={`rounded-xl border p-4 text-left ${nodeFilter === 'all' ? 'border-indigo-400 bg-indigo-50/60' : 'border-slate-200 bg-slate-50 hover:border-slate-300'}`}><div className="font-bold text-slate-900">All nodes</div><div className="mt-2 text-xs text-slate-500">Show every pod in the cluster</div></button>}
         </div>

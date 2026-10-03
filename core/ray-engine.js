@@ -55,6 +55,39 @@ async function dockerKubectl(args, options = {}) {
   return result.stdout.trim();
 }
 
+async function waitForRayHead(timeoutMs = 90000) {
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  try {
+    await dockerKubectl([
+      'wait', '--for=condition=Ready', `pod/${RAY_HEAD}`, '-n', RAY_NAMESPACE,
+      `--timeout=${seconds}s`,
+    ], { timeout: timeoutMs + 5000 });
+  } catch (error) {
+    const status = await dockerKubectl(['get', 'pods', '-n', RAY_NAMESPACE, '-o', 'wide']).catch(() => 'Ray pod status unavailable');
+    throw new Error(`Ray head container is not ready for file transfer. ${status}. ${error.message}`);
+  }
+}
+
+async function copyIntoRayHead(source, destination) {
+  await waitForRayHead();
+  const target = `${RAY_NAMESPACE}/${RAY_HEAD}:${destination}`;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await dockerKubectl(['cp', '-c', 'ray', source, target], { timeout: 120000 });
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error.message || '';
+      if (!/container not found|unable to upgrade connection|container is not running|timed out|timeout/i.test(message) || attempt === 2) break;
+      await waitForRayHead();
+      await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
+  }
+  const status = await dockerKubectl(['get', 'pods', '-n', RAY_NAMESPACE, '-o', 'wide']).catch(() => 'Ray pod status unavailable');
+  throw new Error(`Could not copy files into the Ray head container after waiting for it to be Ready. ${status}. ${lastError?.message || 'Unknown copy error'}`);
+}
+
 async function dockerExec(args, options = {}) {
   const result = await execFileAsync('docker', args, {
     timeout: options.timeout || 30000,
@@ -111,9 +144,10 @@ async function stageProject(workspacePath, entrypoint, jobId) {
     if (!Number.isFinite(archiveBytes) || archiveBytes > MAX_PROJECT_BYTES) {
       throw new Error('The compressed project bundle exceeds the 200 MiB transfer limit. Remove large data/build files and retry.');
     }
-    await dockerKubectl(['exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--', 'mkdir', '-p', staging]);
-    await dockerKubectl(['cp', '/c3-core/project_runner.py', `${RAY_NAMESPACE}/${RAY_HEAD}:${staging}/c3_project_runner.py`]);
-    await dockerKubectl(['cp', archive, `${RAY_NAMESPACE}/${RAY_HEAD}:${staging}/project.tar.gz`]);
+    await waitForRayHead();
+    await dockerKubectl(['exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--', 'mkdir', '-p', staging], { timeout: 30000 });
+    await copyIntoRayHead('/c3-core/project_runner.py', `${staging}/c3_project_runner.py`);
+    await copyIntoRayHead(archive, `${staging}/project.tar.gz`);
     await dockerKubectl(['exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--', 'sh', '-lc',
       `mkdir -p ${staging}/project && tar -xzf ${staging}/project.tar.gz -C ${staging}/project && rm ${staging}/project.tar.gz`,
     ]);
@@ -127,7 +161,8 @@ async function downloadProjectResults(workspacePath, jobId) {
   const resultsDirectory = path.join(workspacePath, 'C3-results', jobId);
   const containerDestination = `/workspace/C3-results/${jobId}`;
   await dockerExec(['exec', 'c3-k3s-master', 'mkdir', '-p', containerDestination]);
-  await dockerKubectl(['cp', `${RAY_NAMESPACE}/${RAY_HEAD}:/tmp/c3-job/${jobId}/results`, containerDestination]);
+  await waitForRayHead();
+  await dockerKubectl(['cp', '-c', 'ray', `${RAY_NAMESPACE}/${RAY_HEAD}:/tmp/c3-job/${jobId}/results`, containerDestination], { timeout: 180000 });
   await dockerKubectl(['exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--', 'rm', '-rf', `/tmp/c3-job/${jobId}`]).catch(() => {});
   return resultsDirectory;
 }
@@ -406,8 +441,9 @@ async function startAiJob(options = {}) {
       '--script-args', scriptArgs, '--job-id', jobId, '--results-dir', `/tmp/c3-job/${jobId}/results`,
     ];
   } else {
-    await dockerKubectl(['exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--', 'mkdir', '-p', '/tmp/c3-job']);
-    await dockerKubectl(['cp', '/c3-core/ai_trainer.py', `${RAY_NAMESPACE}/${RAY_HEAD}:/tmp/c3-job/ai_trainer.py`]);
+    await waitForRayHead();
+    await dockerKubectl(['exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--', 'mkdir', '-p', '/tmp/c3-job'], { timeout: 30000 });
+    await copyIntoRayHead('/c3-core/ai_trainer.py', '/tmp/c3-job/ai_trainer.py');
     args = [
       'exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--',
       'ray', 'job', 'submit', '--address=http://127.0.0.1:8265', `--submission-id=${jobId}`, '--working-dir=/tmp/c3-job', '--',
@@ -540,11 +576,16 @@ async function getRayClusterStatus() {
   let nodes = [];
   _rayPodsReady = 0;
   let ready = false;
+  let rayPodCount = 0;
+  let dashboardReachable = false;
+  let headReady = false;
+  let statusReadError = null;
   try {
     nodes = await readKubernetesNodes();
     const raw = await dockerKubectl(['get', 'pods', '-n', RAY_NAMESPACE, '-l', 'c3.io/name=ray', '-o', 'json']);
     const pods = JSON.parse(raw).items || [];
-    const headReady = pods.some(p => p.metadata?.name === RAY_HEAD && p.status?.phase === 'Running' && (p.status?.containerStatuses || []).some(c => c.ready));
+    rayPodCount = pods.length;
+    headReady = pods.some(p => p.metadata?.name === RAY_HEAD && p.status?.phase === 'Running' && (p.status?.containerStatuses || []).some(c => c.ready));
     if (headReady) {
       const output = await dockerKubectl([
         'exec', '-n', RAY_NAMESPACE, RAY_HEAD, '--', 'python', '-c',
@@ -556,7 +597,6 @@ async function getRayClusterStatus() {
       const expectedPods = nodes.length;
       _rayPodsReady = readyPods.length;
       ensureDashboardForward();
-      let dashboardReachable = false;
       // Port-forward startup is asynchronous. Give kubectl a short window to
       // bind the host port before reporting an otherwise healthy Ray cluster
       // as unconfigured on the first status refresh.
@@ -566,8 +606,9 @@ async function getRayClusterStatus() {
       }
       ready = expectedPods > 0 && readyPods.length >= expectedPods && rayNodes.length >= expectedPods && dashboardReachable;
     }
-  } catch (_) {
+  } catch (error) {
     ready = false;
+    statusReadError = error.message || 'Kubernetes could not read Ray status.';
   }
   _rayClusterReady = ready;
   _rayNodes = rayNodes;
@@ -586,13 +627,19 @@ async function getRayClusterStatus() {
 
   return {
     status: ready ? 'ONLINE' : 'NOT_CONFIGURED',
-    error: ready ? null : (nodes.length ? 'Ray has not started on every Ready K3s node yet.' : 'No Ready K3s nodes are available. Start the cluster first.'),
+    error: ready ? null : !nodes.length ? 'No Ready K3s nodes are available. Start the cluster first.'
+      : statusReadError || !headReady ? `Ray head is not Ready (${_rayPodsReady}/${rayPodCount} Ray pods ready). Check Nodes & Pods and the Ray pod events.`
+        : _rayPodsReady < nodes.length ? `Only ${_rayPodsReady} of ${nodes.length} Ray pods are Ready; the remaining K3s nodes have no ready Ray worker yet.`
+          : rayNodes.length < nodes.length ? `Ray currently reports ${rayNodes.length} live node(s) for ${nodes.length} Ready K3s node(s). Check the Ray worker pod logs and resource limits.`
+            : !dashboardReachable ? 'Ray nodes are live, but the Ray Jobs dashboard is not reachable on localhost:8265.'
+              : 'Ray cluster readiness could not be verified.',
     dashboardUrl: ready ? 'http://localhost:8265' : null,
     dashboardPort: ready ? 8265 : null,
     port: ready ? 6379 : null,
     rayNodeCount: rayNodes.length,
     kubernetesReadyNodeCount: (await readKubernetesNodes().catch(() => [])).length,
     rayPodsReady: _rayPodsReady,
+    rayPodCount,
     rayNodes: rayNodes.map(node => node.NodeManagerAddress || node.NodeManagerHostname).filter(Boolean),
     coresAvailable,
     gpusAvailable: null,

@@ -66,8 +66,9 @@ contextBridge.exposeInMainWorld('c3', {
   },
 
   // ── Phase 5: Interactive Terminal ──
-  initTerminal: (target) => ipcRenderer.invoke('terminal:init', target),
+  initTerminal: (target, dimensions) => ipcRenderer.invoke('terminal:init', target, dimensions),
   writeTerminal: (data) => ipcRenderer.invoke('terminal:write', data),
+  resizeTerminal: (cols, rows) => ipcRenderer.invoke('terminal:resize', cols, rows),
   killTerminal: () => ipcRenderer.invoke('terminal:kill'),
   onTerminalData: (callback) => {
     const handler = (_event, data) => callback(data);
