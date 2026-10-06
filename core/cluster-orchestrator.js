@@ -292,9 +292,15 @@ async function discoverNodes(currentUserId = null) {
           // that old address makes an online provider appear selected while
           // cluster launch can never reach it.
           const advertisedMeshIp = p.tailscaleIp || null;
-          const advertisedPeerOnline = !tailscale.running || !advertisedMeshIp
-            || (tailscale.onlinePeers || []).some(peer => peer.ips?.includes(advertisedMeshIp));
-          const meshIp = livePeerIp || (advertisedPeerOnline ? advertisedMeshIp : null);
+          // Registry addresses are only hints. When this client has a live
+          // Tailscale view, accept a mesh address only if the daemon currently
+          // reports that exact IP on an online peer. When Tailscale is down,
+          // never reuse yesterday's advertised mesh address.
+          const advertisedPeerOnline = Boolean(tailscale.running && advertisedMeshIp &&
+            (tailscale.onlinePeers || []).some(peer => peer.ips?.includes(advertisedMeshIp)));
+          const meshIp = tailscale.running
+            ? (livePeerIp || (advertisedPeerOnline ? advertisedMeshIp : null))
+            : null;
           // Old builds keyed every device under the Cognito user ID. Ignore
           // that legacy self-row and any stale endpoint that now resolves to
           // this consumer machine; new builds publish a per-device providerId.

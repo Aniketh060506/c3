@@ -14,7 +14,7 @@
 
 const dgram = require('dgram');
 const http = require('http');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const os = require('os');
 const net = require('net');
@@ -32,6 +32,13 @@ function isTailscalePeerAddress(address = '') {
   const ip = address.replace(/^::ffff:/i, '');
   const octets = ip.split('.').map(Number);
   return octets.length === 4 && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
+}
+
+function isUsableIPv4(address = '') {
+  if (typeof address !== 'string' || address === 'Disconnected') return false;
+  const parts = address.split('.');
+  return parts.length === 4 && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255) &&
+    !address.startsWith('0.') && !address.startsWith('127.') && !address.startsWith('169.254.');
 }
 
 let _sharing = false;
@@ -187,7 +194,11 @@ async function startSharing(userId, config = {}) {
       _config.tailscaleNodeName = currentTailscale.running
         ? (currentTailscale.hostname || currentTailscale.dnsName || null)
         : null;
-      _config.localIp = currentStats.network?.ip || _config.localIp;
+      // Clear an old endpoint when this adapter is gone; do not keep publishing
+      // the address from the previous Wi-Fi/LAN network.
+      _config.localIp = isUsableIPv4(currentStats.network?.ip) && !isTailscalePeerAddress(currentStats.network.ip)
+        ? currentStats.network.ip
+        : null;
       if (_cloudRegistered) {
         await dynamodb.heartbeat(providerId, getRegistryProfile());
       } else {
@@ -421,12 +432,21 @@ async function acceptSession(sessionData) {
   }
   const { sessionId, masterIp, clusterToken, gpuEnabled } = sessionData;
   const flannelBackend = sessionData.flannelBackend === 'wireguard-native' ? 'wireguard-native' : 'vxlan';
-  // Older pending invitations did not persist workerNodeIp. Recover the
-  // provider's own address from the interface matching the consumer's route.
-  // A Tailscale master must pair with this provider's Tailscale address;
-  // otherwise use the LAN address advertised by this provider.
-  const workerNodeIp = sessionData.workerNodeIp ||
-    (isTailscalePeerAddress(masterIp) ? _config.tailscaleIp : _config.localIp);
+  // Requests can sit in the cloud queue while either laptop changes networks.
+  // Resolve the provider's current address when the request is accepted and
+  // use the same transport as the consumer's master, not its old request-time IP.
+  const [currentTailscale, currentStats] = await Promise.all([
+    setupChecker.checkTailscale(),
+    hardware.getLiveStats(),
+  ]);
+  _config.tailscaleIp = currentTailscale.running ? currentTailscale.ip : null;
+  _config.tailscaleNodeName = currentTailscale.running
+    ? (currentTailscale.hostname || currentTailscale.dnsName || null)
+    : null;
+  _config.localIp = isUsableIPv4(currentStats.network?.ip) && !isTailscalePeerAddress(currentStats.network.ip)
+    ? currentStats.network.ip
+    : null;
+  const workerNodeIp = isTailscalePeerAddress(masterIp) ? _config.tailscaleIp : _config.localIp;
   console.log('[provider] Validating provider session invitation.', {
     sessionId,
     masterIp,
@@ -443,8 +463,8 @@ async function acceptSession(sessionData) {
   if (!clusterToken || !tokenRegex.test(clusterToken)) {
     throw new Error('Security Error: Invalid cluster token format.');
   }
-  if (!workerNodeIp || !ipRegex.test(workerNodeIp)) {
-    throw new Error('Security Error: Provider host address is invalid; rescan nodes before accepting this invitation.');
+  if (!workerNodeIp || !isUsableIPv4(workerNodeIp)) {
+    throw new Error(`No current provider IP is available on the consumer's ${isTailscalePeerAddress(masterIp) ? 'Tailscale' : 'LAN'} network. Reconnect that network and retry accepting the request.`);
   }
   if (sessionId && !tokenRegex.test(sessionId)) {
     throw new Error('Security Error: Invalid session ID format.');

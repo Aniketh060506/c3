@@ -127,12 +127,13 @@ async function getActiveProviders() {
 
     const nowSec = Math.floor(Date.now() / 1000);
 
-    // Active within last 10 minutes
+    // Provider endpoints can change with Wi-Fi/Tailscale networks. Treat an
+    // endpoint as live only while its 15-second heartbeat is reasonably fresh.
     const activeItems = items.filter(item => {
-      if (!item.lastHeartbeat) return true;
+      if (!item.lastHeartbeat) return false;
       const hb = typeof item.lastHeartbeat === 'string' ? parseInt(item.lastHeartbeat, 10) : item.lastHeartbeat;
       const hbSec = hb > 10_000_000_000 ? Math.floor(hb / 1000) : hb;
-      return (nowSec - hbSec) < 600;
+      return Number.isFinite(hbSec) && nowSec - hbSec < 60;
     });
 
     return activeItems;
