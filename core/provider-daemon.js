@@ -76,6 +76,24 @@ function canReachK3sApi(host, timeout = 2500) {
   });
 }
 
+function getRegistryProfile() {
+  return {
+    hostname: _config.hostname,
+    cpuModel: _config.cpuModel,
+    physicalCores: _config.physicalCores,
+    coresOffered: _config.cores,
+    ramOfferedGb: _config.ramGb,
+    ramType: _config.ramType,
+    gpuModel: _config.gpuEnabled ? _config.gpuModel : 'None',
+    gpuVramGb: _config.gpuEnabled ? _config.gpuVramGb : null,
+    pricePerHour: _config.pricePerHour,
+    tailscaleIp: _config.tailscaleIp,
+    tailscaleNodeName: _config.tailscaleNodeName,
+    localIp: _config.localIp,
+    port: RPC_PORT,
+  };
+}
+
 // ── 1. Start Sharing ────────────────────────────────────────────────────────
 async function startSharing(userId, config = {}) {
   if (_sharing) return getProviderState();
@@ -114,6 +132,7 @@ async function startSharing(userId, config = {}) {
     gpuModel: specs.gpuModel,
     gpuVramGb: specs.gpuVramGb,
     tailscaleIp: tailscale.running ? tailscale.ip : null,
+    tailscaleNodeName: tailscale.running ? (tailscale.hostname || tailscale.dnsName || null) : null,
     localIp: live.network.ip,
   };
 
@@ -124,20 +143,7 @@ async function startSharing(userId, config = {}) {
 
   // 1. Register with DynamoDB
   try {
-    await dynamodb.registerProvider(userId, {
-      hostname: _config.hostname,
-      cpuModel: _config.cpuModel,
-      physicalCores: _config.physicalCores,
-      coresOffered: _config.cores,
-      ramOfferedGb: _config.ramGb,
-      ramType: _config.ramType,
-      gpuModel: _config.gpuEnabled ? _config.gpuModel : 'None',
-      gpuVramGb: _config.gpuEnabled ? _config.gpuVramGb : null,
-      pricePerHour: _config.pricePerHour,
-      tailscaleIp: _config.tailscaleIp,
-      localIp: _config.localIp,
-      port: RPC_PORT,
-    });
+    await dynamodb.registerProvider(userId, getRegistryProfile());
     _cloudRegistered = true;
   } catch (err) {
     _cloudRegistered = false;
@@ -146,10 +152,29 @@ async function startSharing(userId, config = {}) {
 
   // 2. Start DynamoDB Heartbeat (every 15s)
   _heartbeatTimer = setInterval(async () => {
-    if (!_sharing || !_cloudRegistered) return;
+    if (!_sharing) return;
     try {
-      await dynamodb.heartbeat(userId);
-    } catch (_) { _cloudRegistered = false; }
+      // Tailscale addresses can change after reconnects. Refresh the advertised
+      // endpoint from the local Tailscale daemon instead of keeping the startup IP.
+      const [currentTailscale, currentStats] = await Promise.all([
+        setupChecker.checkTailscale(),
+        hardware.getLiveStats(),
+      ]);
+      _config.tailscaleIp = currentTailscale.running ? currentTailscale.ip : null;
+      _config.tailscaleNodeName = currentTailscale.running
+        ? (currentTailscale.hostname || currentTailscale.dnsName || null)
+        : null;
+      _config.localIp = currentStats.network?.ip || _config.localIp;
+      if (_cloudRegistered) {
+        await dynamodb.heartbeat(userId, getRegistryProfile());
+      } else {
+        await dynamodb.registerProvider(userId, getRegistryProfile());
+        _cloudRegistered = true;
+      }
+    } catch (err) {
+      _cloudRegistered = false;
+      console.warn('[provider] Registry refresh failed; will retry:', err.message);
+    }
   }, 15000);
 
   // 3. Start LAN UDP Beacon Broadcaster

@@ -79,15 +79,29 @@ async function updateProviderStatus(userId, status) {
   await client.send(command);
 }
 
-async function heartbeat(userId) {
+async function heartbeat(userId, network = null) {
   const client = getClient();
+  const now = Math.floor(Date.now() / 1000);
+  const fields = { lastHeartbeat: now };
+  if (network && typeof network === 'object') {
+    if (Object.hasOwn(network, 'tailscaleIp')) fields.tailscaleIp = network.tailscaleIp || null;
+    if (Object.hasOwn(network, 'tailscaleNodeName')) fields.tailscaleNodeName = network.tailscaleNodeName || null;
+    if (Object.hasOwn(network, 'localIp')) fields.localIp = network.localIp || null;
+    if (Number.isInteger(network.port) && network.port > 0 && network.port <= 65535) fields.port = network.port;
+  }
+  const values = { ':ts': now };
+  const assignments = ['lastHeartbeat = :ts'];
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === 'lastHeartbeat') continue;
+    const token = `:${key}`;
+    assignments.push(`${key} = ${token}`);
+    values[token] = value;
+  }
   const command = new UpdateItemCommand({
     TableName: 'c3_providers',
     Key: marshall({ userId }),
-    UpdateExpression: 'SET lastHeartbeat = :ts',
-    ExpressionAttributeValues: marshall({
-      ':ts': Math.floor(Date.now() / 1000),
-    }),
+    UpdateExpression: `SET ${assignments.join(', ')}`,
+    ExpressionAttributeValues: marshall(values),
   });
 
   await client.send(command);
@@ -95,16 +109,22 @@ async function heartbeat(userId) {
 
 async function getActiveProviders() {
   const client = getClient();
-  const command = new ScanCommand({
-    TableName: 'c3_providers',
-    FilterExpression: '#status = :s',
-    ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: marshall({ ':s': 'ACTIVE' }),
-  });
-
+  const items = [];
+  let exclusiveStartKey;
   try {
-    const response = await client.send(command);
-    const items = response.Items ? response.Items.map(item => unmarshall(item)) : [];
+    do {
+      const command = new ScanCommand({
+        TableName: 'c3_providers',
+        FilterExpression: '#status = :s',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: marshall({ ':s': 'ACTIVE' }),
+        ExclusiveStartKey: exclusiveStartKey,
+      });
+      const response = await client.send(command);
+      if (response.Items) items.push(...response.Items.map(item => unmarshall(item)));
+      exclusiveStartKey = response.LastEvaluatedKey;
+    } while (exclusiveStartKey);
+
     const nowSec = Math.floor(Date.now() / 1000);
 
     // Active within last 10 minutes

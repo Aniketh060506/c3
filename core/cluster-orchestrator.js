@@ -53,7 +53,7 @@ function sendProviderInvitation(host, payload, timeout = 3000) {
     const body = JSON.stringify(payload);
     const req = http.request({
       hostname: host,
-      port: 44344,
+      port: payload.providerRpcPort || 44344,
       path: '/session/join',
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
@@ -211,6 +211,7 @@ async function discoverNodes() {
               ip: rinfo.address,
               localIp: data.localIp || rinfo.address,
               meshIp: data.meshIp,
+              port: Number.isInteger(Number(data.port)) && Number(data.port) > 0 ? Number(data.port) : 44344,
               latencyMs: null,
               status: data.status || 'ACTIVE',
               source: 'lan',
@@ -237,6 +238,23 @@ async function discoverNodes() {
       if (p.hostname !== specs.hostname && p.userId) {
         const existing = foundMap.get(p.userId);
         if (!existing) {
+          const hostAliases = value => {
+            const shortName = String(value || '').trim().replace(/\.$/, '').split('.')[0].toLowerCase();
+            return new Set([shortName, shortName.replace(/^c3-(?:master|worker)-/, '')].filter(Boolean));
+          };
+          const expectedNames = new Set([
+            ...hostAliases(p.tailscaleNodeName),
+            ...hostAliases(p.hostname),
+          ]);
+          const matchingPeers = (tailscale.onlinePeers || []).filter(peer => {
+            const aliases = [...hostAliases(peer.hostname), ...hostAliases(peer.dnsName)];
+            return aliases.some(alias => expectedNames.has(alias));
+          });
+          // Use a current address from the local Tailscale daemon when the
+          // registry's last advertised IP is stale. Resolve only unambiguous
+          // peer names so we never silently connect to another device.
+          const livePeerIp = matchingPeers.length === 1 ? matchingPeers[0].ips?.[0] : null;
+          const meshIp = livePeerIp || p.tailscaleIp || null;
           foundMap.set(p.userId, {
             id: p.userId,
             hostname: p.hostname || 'Cloud Peer',
@@ -248,9 +266,10 @@ async function discoverNodes() {
             ramType: p.ramType || 'Unknown',
             gpu: p.gpuModel && p.gpuModel !== 'None' ? p.gpuModel : null,
             gpuVramGb: finiteOrNull(p.gpuVramGb),
-            ip: p.tailscaleIp || p.localIp,
+            ip: meshIp || p.localIp,
             localIp: p.localIp || null,
-            meshIp: p.tailscaleIp,
+            meshIp,
+            port: Number.isInteger(Number(p.port)) && Number(p.port) > 0 ? Number(p.port) : 44344,
             latencyMs: null,
             status: 'ACTIVE',
             source: 'cloud',
@@ -262,23 +281,19 @@ async function discoverNodes() {
     console.warn('[orchestrator] Cloud discovery notice:', err.message);
   }
 
-  // 3. Measure Real Ping Latency for All Remote Nodes
-  for (const node of foundMap.values()) {
-    if (!node.isSelf) {
-      const targetHosts = [...new Set([node.meshIp, node.localIp, node.ip].filter(Boolean))];
-      let connected = false;
-      for (const targetHost of targetHosts) {
-        const realLat = await probeHostLatency(targetHost, 44344, 700);
-        if (realLat !== null) {
-          node.latencyMs = realLat;
-          node.connectionIp = targetHost;
-          connected = true;
-          break;
-        }
-      }
-      if (!connected) node.status = 'UNREACHABLE';
+  // 3. Probe remote endpoints concurrently so one offline address/provider
+  // does not make discovery feel like a long per-node timeout queue.
+  await Promise.all([...foundMap.values()].filter(node => !node.isSelf).map(async node => {
+    const targetHosts = [...new Set([node.meshIp, node.localIp, node.ip].filter(Boolean))];
+    const results = await Promise.all(targetHosts.map(host => probeHostLatency(host, node.port || 44344, 700)));
+    const reachableIndex = results.findIndex(latency => latency !== null);
+    if (reachableIndex < 0) {
+      node.status = 'UNREACHABLE';
+      return;
     }
-  }
+    node.latencyMs = results[reachableIndex];
+    node.connectionIp = targetHosts[reachableIndex];
+  }));
 
   _discoveredNodesCache = Array.from(foundMap.values());
   return _discoveredNodesCache;
@@ -350,7 +365,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
   let tailscaleTransport = remoteNodes.length > 0 && tailscale.running;
   if (tailscaleTransport) {
     for (const node of remoteNodes) {
-      if (!node.meshIp || await probeHostLatency(node.meshIp, 44344, 900) === null) {
+      if (!node.meshIp || await probeHostLatency(node.meshIp, node.port || 44344, 900) === null) {
         tailscaleTransport = false;
         break;
       }
@@ -368,11 +383,17 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
     const unreachable = [];
     for (const node of remoteNodes) {
       const lanIp = node.localIp || (node.source === 'lan' ? node.ip : null);
-      if (!lanIp || await probeHostLatency(lanIp, 44344, 900) === null) unreachable.push(node.hostname || node.id);
+      if (!lanIp || await probeHostLatency(lanIp, node.port || 44344, 900) === null) {
+        const endpoints = [
+          node.meshIp ? `Tailscale ${node.meshIp}` : null,
+          lanIp ? `LAN ${lanIp}` : null,
+        ].filter(Boolean).join(', ') || 'no current IP advertised';
+        unreachable.push(`${node.hostname || node.id} (${endpoints})`);
+      }
       else node.clusterIp = lanIp;
     }
     if (unreachable.length) {
-      throw new Error(`Cannot start a shared cluster: every selected provider must be reachable on the same network using Tailscale or LAN. Unreachable: ${unreachable.join(', ')}. Start Provider → Start Sharing, check both machines are online, and allow TCP 44344 and TCP 6443 plus the selected Flannel UDP port through firewalls.`);
+      throw new Error(`Cannot start a shared cluster because these selected providers did not answer on their advertised provider RPC port: ${unreachable.join('; ')}. Start Tailscale and Provider → Start Sharing on each provider, wait for its 15-second heartbeat to publish its current mesh IP, then rescan. The provider RPC port is read from its live registry entry; K3s API 6443 and the selected Flannel UDP port remain cluster service ports.`);
     }
   } else if (tailscaleTransport) {
     for (const node of remoteNodes) node.clusterIp = node.meshIp;
@@ -490,6 +511,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
         ramGb: node.ramGb,
         gpuEnabled: !!node.gpu,
         workerNodeIp: node.clusterIp || (tailscaleTransport ? node.meshIp : node.localIp || node.ip),
+        providerRpcPort: node.port || 44344,
         flannelBackend,
       };
 

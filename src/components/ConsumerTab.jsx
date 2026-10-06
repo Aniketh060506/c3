@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import NegotiationChat from './NegotiationChat';
 import {
   Folder,
@@ -38,6 +38,7 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
   const [requestSessions, setRequestSessions] = useState({});
   const [negotiatingRequest, setNegotiatingRequest] = useState(null);
   const [localAllocation, setLocalAllocation] = useState({ cores: 1, ramGb: 1 });
+  const discoveryBusy = useRef(false);
   const maxLocalCores = Math.max(1, Math.min(Number(specs?.cpuCores || 1) - 1, Number(dockerCapacity?.cpus || specs?.cpuCores || 1) - 1));
   const dockerRamGb = Number(dockerCapacity?.memoryTotal || 0) / (1024 ** 3);
   const maxLocalRamGb = Math.max(1, Math.floor(Math.min(Number(specs?.ramUsableGb || 1), dockerRamGb > 0 ? dockerRamGb : Number(specs?.ramUsableGb || 1)) - 1));
@@ -85,6 +86,13 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
     };
   }, []);
 
+  // Keep the provider list current while Consumer Studio is open. The ref
+  // prevents a slow AWS query/UDP scan from overlapping the next refresh.
+  useEffect(() => {
+    const timer = setInterval(() => handleDiscoverNodes(), 10000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Keep polling while a cluster instance exists, including transient API
   // errors, so the UI can recover when Docker/K3s comes back.
   useEffect(() => {
@@ -117,22 +125,29 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
   }, [requestIds]);
 
   const handleDiscoverNodes = async () => {
+    if (discoveryBusy.current) return;
+    discoveryBusy.current = true;
     setScanning(true);
     try {
       if (window.c3?.discoverNodes) {
         const list = await window.c3.discoverNodes();
         const remoteProviders = (list || []).filter(node => !node.isSelf && node.id !== 'self-node');
         setNodes(remoteProviders);
-        setSelectedNodeIds(previous => new Set([...previous].filter(id => remoteProviders.some(node => node.id === id))));
+        setSelectedNodeIds(previous => new Set([...previous].filter(id => remoteProviders.some(node =>
+          node.id === id && node.status !== 'UNREACHABLE' && Number.isFinite(node.latencyMs)
+        ))));
       }
     } catch (err) {
       console.error('[consumer] Node discovery error:', err);
     } finally {
+      discoveryBusy.current = false;
       setScanning(false);
     }
   };
 
   const handleToggleNode = (nodeId) => {
+    const provider = nodes.find(node => node.id === nodeId);
+    if (!provider || provider.status === 'UNREACHABLE' || !Number.isFinite(provider.latencyMs)) return;
     const next = new Set(selectedNodeIds);
     if (next.has(nodeId)) next.delete(nodeId);
     else next.add(nodeId);
@@ -153,6 +168,12 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
   const handleLaunchCluster = async () => {
     if (!workspace) {
       alert('Please select a local workspace directory before launching the cluster.');
+      return;
+    }
+    const unavailableSelected = nodes.filter(node => selectedNodeIds.has(node.id)
+      && (node.status === 'UNREACHABLE' || !Number.isFinite(node.latencyMs)));
+    if (unavailableSelected.length) {
+      alert(`These selected providers are offline or unreachable: ${unavailableSelected.map(node => node.hostname).join(', ')}. Rescan after the provider is online.`);
       return;
     }
 
@@ -419,12 +440,15 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
             </div>
           ) : nodes.map((node) => {
             const isSelected = selectedNodeIds.has(node.id);
+            const isReachable = node.status !== 'UNREACHABLE' && Number.isFinite(node.latencyMs);
 
             return (
               <div
                 key={node.id}
                 onClick={() => handleToggleNode(node.id)}
-                className={`p-5 rounded-[28px] border transition-all cursor-pointer expand-card space-y-3 ${
+                aria-disabled={!isReachable}
+                title={!isReachable ? 'Provider is offline or cannot be reached. Start sharing on that PC, then rescan.' : 'Select this reachable provider'}
+                className={`p-5 rounded-[28px] border transition-all expand-card space-y-3 ${!isReachable ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'} ${
                   isSelected
                     ? 'bg-white border-indigo-500/80 shadow-soft ring-2 ring-indigo-500/20'
                     : 'bg-white/80 border-slate-200 hover:border-slate-300'
@@ -454,7 +478,7 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
                   </div>
 
                   <div className="text-right font-mono text-xs">
-                    <span className="text-emerald-700 font-bold">{node.latencyMs}ms</span>
+                    <span className={`font-bold ${isReachable ? 'text-emerald-700' : 'text-rose-700'}`}>{isReachable ? `Reachable · ${node.latencyMs}ms` : 'OFFLINE / UNREACHABLE'}</span>
                   </div>
                 </div>
 

@@ -91,6 +91,13 @@ async function checkTailscale() {
       installed: true,
       version: version || 'Installed',
       ip,
+      hostname: self.HostName || null,
+      dnsName: self.DNSName || null,
+      onlinePeers: onlinePeers.map(peer => ({
+        hostname: peer.HostName || null,
+        dnsName: peer.DNSName || null,
+        ips: (peer.TailscaleIPs || []).filter(address => address.startsWith('100.')),
+      })),
       running,
       backendState: status.BackendState || 'Unknown',
       onlinePeerCount: onlinePeers.length,
