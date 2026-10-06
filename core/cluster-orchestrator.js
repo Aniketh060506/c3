@@ -256,7 +256,15 @@ async function discoverNodes(currentUserId = null) {
           // registry's last advertised IP is stale. Resolve only unambiguous
           // peer names so we never silently connect to another device.
           const livePeerIp = matchingPeers.length === 1 ? matchingPeers[0].ips?.[0] : null;
-          const meshIp = livePeerIp || p.tailscaleIp || null;
+          // Once this machine has a live Tailscale view, only use an address
+          // that belongs to a currently-online peer. A registry heartbeat can
+          // be stale (or belong to another device on the same account); using
+          // that old address makes an online provider appear selected while
+          // cluster launch can never reach it.
+          const advertisedMeshIp = p.tailscaleIp || null;
+          const advertisedPeerOnline = !tailscale.running || !advertisedMeshIp
+            || (tailscale.onlinePeers || []).some(peer => peer.ips?.includes(advertisedMeshIp));
+          const meshIp = livePeerIp || (advertisedPeerOnline ? advertisedMeshIp : null);
           // Old builds keyed every device under the Cognito user ID. Ignore
           // that legacy self-row and any stale endpoint that now resolves to
           // this consumer machine; new builds publish a per-device providerId.
@@ -363,12 +371,32 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
   const specs = await hardware.getHardwareSpecs();
   const live = await hardware.getLiveStats();
 
+  const requestedRemoteNodes = selectedNodes.filter(node => !node.isSelf && node.id !== 'self-node');
+  // Reconcile selections against a fresh discovery snapshot. UI selections
+  // can outlive a provider heartbeat, a Tailscale address change, or a provider
+  // restart, so never deploy a cluster using only the old card's addresses.
+  const freshNodes = requestedRemoteNodes.length ? await discoverNodes(userId) : [];
+  const freshById = new Map(freshNodes.filter(node => !node.isSelf).map(node => [node.id, node]));
+  const missing = requestedRemoteNodes.filter(node => !freshById.has(node.id));
+  if (missing.length) {
+    throw new Error(`Selected provider ${missing.map(node => node.hostname || node.id).join(', ')} is no longer advertising a current endpoint. Start sharing on that computer, then rescan providers and select it again.`);
+  }
+  const remoteNodes = requestedRemoteNodes.map(node => freshById.get(node.id));
+  const tailscale = await setupChecker.checkTailscale();
+  const selfAddresses = new Set([
+    live.network?.ip,
+    tailscale.running ? tailscale.ip : null,
+  ].filter(Boolean));
+  const selfSelections = remoteNodes.filter(node =>
+    selfAddresses.has(node.meshIp) || selfAddresses.has(node.localIp) || selfAddresses.has(node.ip));
+  if (selfSelections.length) {
+    throw new Error(`Selected provider ${selfSelections.map(node => node.hostname || node.id).join(', ')} resolves to this computer’s own network address. Its resources are already counted as Local Host. Restart sharing on the other computer and rescan so it advertises its own current addresses.`);
+  }
+
   const clusterToken = `c3-token-${crypto.randomBytes(8).toString('hex')}`;
-  const remoteNodes = selectedNodes.filter(node => !node.isSelf && node.id !== 'self-node');
   const localNode = selectedNodes.find(node => node.isSelf || node.id === 'self-node');
   const localCores = Math.max(1, Number(localNode?.cores || Math.max(1, specs.cpuCores - 2)));
   const localRamGb = Math.max(1, Number(localNode?.ramGb || Math.max(1, Math.floor(specs.ramUsableGb - 4))));
-  const tailscale = await setupChecker.checkTailscale();
   // A K3s node has one advertised external address. Use one transport for the
   // whole cluster instead of advertising Tailscale on the server while
   // inviting LAN-only agents (which cannot route to that address).
