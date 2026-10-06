@@ -4,7 +4,7 @@ import { Activity, Box, CircleAlert, Cpu, Layers3, RefreshCw, Server, Terminal, 
 const panel = 'rounded-2xl border border-slate-200 bg-white shadow-sm';
 
 export default function ClusterExplorer({ onOpenPodShell }) {
-  const [inventory, setInventory] = useState({ nodes: [], pods: [] });
+  const [inventory, setInventory] = useState({ status: 'INACTIVE', nodes: [], pods: [], staleNodeNames: [] });
   const [nodeFilter, setNodeFilter] = useState('all');
   const [selected, setSelected] = useState(null);
   const [processes, setProcesses] = useState(null);
@@ -24,13 +24,20 @@ export default function ClusterExplorer({ onOpenPodShell }) {
         setProcesses(null);
       }
     } catch (err) {
+      setInventory({ status: 'ERROR', nodes: [], pods: [], staleNodeNames: [] });
+      setSelected(null);
+      setProcesses(null);
       setError(err.message || 'K3s is unavailable. Start a cluster from Use compute first.');
     } finally {
       setLoading(false);
     }
   }, [selected]);
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => clearInterval(timer);
+  }, [refresh]);
 
   const visiblePods = useMemo(() => inventory.pods.filter(pod => nodeFilter === 'all' || pod.node === nodeFilter), [inventory.pods, nodeFilter]);
   const inspectProcesses = async (pod, container) => {
@@ -62,6 +69,7 @@ export default function ClusterExplorer({ onOpenPodShell }) {
           </button>
         </div>
         {error && <div className="mt-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><CircleAlert size={17} className="mt-0.5 shrink-0" />{error}</div>}
+        {inventory.staleNodeNames?.length > 0 && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Hidden stale worker record(s) that Kubernetes no longer reports Ready: {inventory.staleNodeNames.join(', ')}. They are not counted as live compute.</div>}
         <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {inventory.nodes.map(node => (
             <div key={node.name} className={`rounded-xl border p-4 transition ${nodeFilter === node.name ? 'border-indigo-400 bg-indigo-50/60 ring-2 ring-indigo-100' : 'border-slate-200 bg-slate-50 hover:border-slate-300'}`}>
@@ -89,7 +97,7 @@ export default function ClusterExplorer({ onOpenPodShell }) {
               <div className="flex flex-wrap gap-2 lg:justify-end">{pod.containers.map(container => <React.Fragment key={container.name}><button disabled={pod.phase !== 'Running'} onClick={() => inspectProcesses(pod, container.name)} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"><Activity size={14} /> Processes</button><button disabled={pod.phase !== 'Running'} onClick={() => onOpenPodShell({ kind: 'pod', namespace: pod.namespace, pod: pod.name, container: container.name })} className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white hover:bg-slate-700 disabled:opacity-40"><Terminal size={14} /> Open shell</button></React.Fragment>)}</div>
             </div>
           ))}
-        </div> : <div className="p-10 text-center text-sm text-slate-500">{loading ? 'Loading pods…' : error ? 'Cluster inventory is unavailable.' : 'No pods on this node.'}</div>}
+        </div> : <div className="p-10 text-center text-sm text-slate-500">{loading ? 'Loading pods…' : error ? 'Cluster inventory is unavailable.' : inventory.status !== 'ACTIVE' ? 'No control-plane container is running on this laptop. Start a local cluster from Use compute; remote providers are optional.' : 'No live pods on this node.'}</div>}
       </div>
 
       {selected && <section className={`${panel} overflow-hidden`}>

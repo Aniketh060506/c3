@@ -140,6 +140,36 @@ function runProcess(command, args) {
   });
 }
 
+async function configureMetricsServerKubeletAddress() {
+  try {
+    const manifest = JSON.parse(await runProcess('docker', [
+      'exec', 'c3-k3s-master', 'kubectl', 'get', 'deployment', 'metrics-server',
+      '-n', 'kube-system', '-o', 'json',
+    ]));
+    const containers = manifest.spec?.template?.spec?.containers || [];
+    const containerIndex = containers.findIndex(container => container.name === 'metrics-server');
+    if (containerIndex < 0) return;
+    const args = containers[containerIndex].args;
+    const argIndex = Array.isArray(args)
+      ? args.findIndex(arg => arg.startsWith('--kubelet-preferred-address-types='))
+      : -1;
+    const argsPath = `/spec/template/spec/containers/${containerIndex}/args`;
+    const patch = !Array.isArray(args)
+      ? [{ op: 'add', path: argsPath, value: ['--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname'] }]
+      : argIndex >= 0
+      ? [{ op: 'replace', path: `/spec/template/spec/containers/${containerIndex}/args/${argIndex}`, value: '--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname' }]
+      : [{ op: 'add', path: `${argsPath}/-`, value: '--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname' }];
+    await runProcess('docker', [
+      'exec', 'c3-k3s-master', 'kubectl', 'patch', 'deployment', 'metrics-server',
+      '-n', 'kube-system', '--type=json', '-p', JSON.stringify(patch),
+    ]);
+  } catch (error) {
+    // Metrics are optional for scheduling. Keep a valid K3s control plane
+    // usable if a particular K3s release does not include metrics-server.
+    console.warn('[orchestrator] Could not adjust metrics-server kubelet address preference:', error.message);
+  }
+}
+
 const UDP_PORT = 44345;
 let _clusterState = null;
 let _discoveredNodesCache = [];
@@ -525,6 +555,8 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
     await execAsync('docker rm -f c3-k3s-master').catch(() => {});
     throw new Error(`K3s control plane did not become Ready after 30 seconds.${safeLogs ? ` Recent container logs: ${safeLogs.trim()}` : ' Check Docker Desktop resources and container logs.'}`);
   }
+
+  await configureMetricsServerKubeletAddress();
 
   // 4. Dispatch invitations to remote Provider nodes
   const invitationResults = [];

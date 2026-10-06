@@ -46,8 +46,11 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
   useEffect(() => {
     if (!specs) return;
     setLocalAllocation({
-      cores: Math.max(1, Math.min(maxLocalCores, Number(specs.cpuCores || 1) - 2)),
-      ramGb: Math.max(2, Math.min(maxLocalRamGb, Math.floor(Number(specs.ramUsableGb || 1) - 4))),
+      // Leave headroom for Windows, Docker Desktop, and the Electron app.
+      // Users can still raise either slider when they intentionally want to
+      // dedicate more of the local machine to a workload.
+      cores: Math.max(1, Math.min(maxLocalCores, Number(specs.cpuCores || 1) - 2, 4)),
+      ramGb: Math.max(2, Math.min(maxLocalRamGb, Math.floor(Number(specs.ramUsableGb || 1) - 4), 4)),
     });
   }, [specs?.cpuCores, specs?.ramUsableGb, dockerCapacity?.cpus, dockerCapacity?.memoryTotal]);
 
@@ -94,9 +97,9 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
   }, []);
 
   // Keep polling while a cluster instance exists, including transient API
-  // errors, so the UI can recover when Docker/K3s comes back.
+  // errors. Poll while inactive too, so an externally started/recovered local
+  // control plane is adopted without requiring a tab switch or manual refresh.
   useEffect(() => {
-    if (clusterStatus.status === 'INACTIVE' || !clusterStatus.startTime) return;
     const t = setInterval(async () => {
       if (window.c3?.getClusterStatus) {
         const s = await window.c3.getClusterStatus();
@@ -104,7 +107,7 @@ export default function ConsumerTab({ specs, dockerCapacity, user, onSwitchTab }
       }
     }, 3000);
     return () => clearInterval(t);
-  }, [clusterStatus.status]);
+  }, []);
 
   const providerRequests = clusterStatus.invitationResults || [];
   const requestIds = providerRequests.map(request => request.sessionId).filter(Boolean).join(',');

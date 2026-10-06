@@ -15,13 +15,25 @@ async function kubectl(args, timeout = 20000) {
 }
 
 async function getInventory() {
+  let masterContainers;
+  try {
+    masterContainers = await execFileAsync('docker', [
+      'ps', '--filter', 'name=^/c3-k3s-master$', '--format', '{{.Names}}',
+    ], { windowsHide: true, timeout: 10000 });
+  } catch (error) {
+    throw new Error(`Docker is unavailable, so the live cluster inventory cannot be read: ${error.message}`);
+  }
+  if (!masterContainers.stdout.trim()) {
+    return { ok: true, status: 'INACTIVE', nodes: [], pods: [], staleNodeNames: [], fetchedAt: new Date().toISOString() };
+  }
+
   const [nodesText, podsText] = await Promise.all([
     kubectl(['get', 'nodes', '-o', 'json']),
     kubectl(['get', 'pods', '-A', '-o', 'json']),
   ]);
   const nodeDoc = JSON.parse(nodesText);
   const podDoc = JSON.parse(podsText);
-  const nodes = (nodeDoc.items || []).map(item => {
+  const allNodes = (nodeDoc.items || []).map(item => {
     const labels = item.metadata?.labels || {};
     const ready = (item.status?.conditions || []).find(c => c.type === 'Ready')?.status === 'True';
     return {
@@ -53,10 +65,19 @@ async function getInventory() {
       containers,
     };
   });
+  // K3s keeps a Node object after a provider container disappears. Only Ready
+  // workers are live compute; retain a not-ready control plane for diagnostics,
+  // but keep dead worker rows and their orphaned pods out of the live view.
+  const staleNodeNames = allNodes
+    .filter(node => node.role === 'Worker' && !node.ready)
+    .map(node => node.name);
+  const nodes = allNodes.filter(node => node.role !== 'Worker' || node.ready);
+  const liveNodeNames = new Set(nodes.map(node => node.name));
+  const livePods = pods.filter(pod => pod.node === 'Unassigned' || liveNodeNames.has(pod.node));
   const counts = new Map();
-  for (const pod of pods) counts.set(pod.node, (counts.get(pod.node) || 0) + 1);
+  for (const pod of livePods) counts.set(pod.node, (counts.get(pod.node) || 0) + 1);
   for (const node of nodes) node.podCount = counts.get(node.name) || 0;
-  return { ok: true, nodes, pods, fetchedAt: new Date().toISOString() };
+  return { ok: true, status: 'ACTIVE', nodes, pods: livePods, staleNodeNames, fetchedAt: new Date().toISOString() };
 }
 
 async function getPodProcesses({ namespace, pod, container } = {}) {
