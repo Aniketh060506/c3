@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('c3', {
     ipcRenderer.on('provider:invitation-received', handler);
     return () => ipcRenderer.removeListener('provider:invitation-received', handler);
   },
+  onProviderRequestError: (callback) => {
+    const handler = (_event, message) => callback(message);
+    ipcRenderer.on('provider:request-error', handler);
+    return () => ipcRenderer.removeListener('provider:request-error', handler);
+  },
   onProviderSessionStarted: (callback) => {
     const handler = (_event, session) => callback(session);
     ipcRenderer.on('provider:session-started', handler);

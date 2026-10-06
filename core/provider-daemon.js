@@ -45,6 +45,9 @@ let _startTime = null;
 let _activeSession = null;
 let _cloudRegistered = false;
 let _ipcCallback = null;
+let _pendingInvitation = null;
+let _requestPollError = null;
+let _sessionPollBusy = false;
 
 function setIpcCallback(cb) {
   _ipcCallback = cb;
@@ -151,6 +154,8 @@ async function startSharing(userId, config = {}) {
   _sharing = true;
   _startTime = Date.now();
   _activeSession = null;
+  _pendingInvitation = null;
+  _requestPollError = null;
   _cloudRegistered = false;
 
   // 1. Register with DynamoDB
@@ -282,9 +287,12 @@ async function startSharing(userId, config = {}) {
               gpuEnabled: data.gpuEnabled ?? _config.gpuEnabled,
               rate: _config.pricePerHour,
               receivedAt: Date.now(),
+              deliverySource: 'direct',
             };
 
             // Notify UI
+            _pendingInvitation = invitation;
+            _requestPollError = null;
             notifyUI('provider:invitation-received', invitation);
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -353,9 +361,11 @@ async function startSharing(userId, config = {}) {
     throw new Error(`Provider RPC could not bind port ${RPC_PORT}: ${err.message}`);
   }
 
-  // 5. Poll DynamoDB for Cloud Session Requests (every 4s)
-  _sessionPollTimer = setInterval(async () => {
+  // 5. Poll DynamoDB for Cloud Session Requests (immediately, then every 4s).
+  const pollPendingRequests = async () => {
     if (!_sharing) return;
+    if (_sessionPollBusy) return;
+    _sessionPollBusy = true;
     try {
       if (_activeSession) {
         const session = await dynamodb.getSession(_activeSession.sessionId);
@@ -363,9 +373,10 @@ async function startSharing(userId, config = {}) {
         return;
       }
       const pending = await dynamodb.getPendingRequestsForProvider(providerId);
-      if (pending && pending.length > 0) {
-        const reqItem = pending[0];
-        notifyUI('provider:invitation-received', {
+      _requestPollError = null;
+      const reqItem = pending?.[0];
+      if (reqItem) {
+        const invitation = {
           sessionId: reqItem.sessionId,
           consumerId: reqItem.consumerId,
           providerId: reqItem.providerId,
@@ -380,10 +391,24 @@ async function startSharing(userId, config = {}) {
           gpuEnabled: reqItem.gpuEnabled ?? _config.gpuEnabled,
           rate: _config.pricePerHour,
           receivedAt: Date.now(),
-        });
+          deliverySource: 'cloud',
+        };
+        const isNewRequest = _pendingInvitation?.sessionId !== invitation.sessionId;
+        _pendingInvitation = invitation;
+        if (isNewRequest) notifyUI('provider:invitation-received', invitation);
+      } else if (_pendingInvitation?.providerId === providerId && _pendingInvitation.deliverySource === 'cloud') {
+        _pendingInvitation = null;
       }
-    } catch (_) {}
-  }, 4000);
+    } catch (error) {
+      _requestPollError = error.message || 'Could not check the cloud request queue.';
+      console.warn('[provider] Cloud invitation poll failed:', _requestPollError);
+      notifyUI('provider:request-error', _requestPollError);
+    } finally {
+      _sessionPollBusy = false;
+    }
+  };
+  pollPendingRequests();
+  _sessionPollTimer = setInterval(pollPendingRequests, 4000);
 
   return getProviderState();
 }
@@ -489,6 +514,8 @@ async function acceptSession(sessionData) {
     startedAt: Date.now(),
     status: 'STARTING',
   };
+  _pendingInvitation = null;
+  _requestPollError = null;
 
   // 3. Update DynamoDB
   try {
@@ -509,6 +536,7 @@ async function declineSession(sessionId) {
       reason: 'Rejected by provider operator.',
     });
   } catch (_) {}
+  if (_pendingInvitation?.sessionId === sessionId) _pendingInvitation = null;
   return { ok: true, sessionId };
 }
 
@@ -557,6 +585,7 @@ async function stopSharing() {
   }
 
   _activeSession = null;
+  _pendingInvitation = null;
   _cloudRegistered = false;
   return getProviderState();
 }
@@ -571,6 +600,8 @@ function getProviderState() {
     sharing: _sharing,
     config: _config,
     activeSession: _activeSession,
+    pendingInvitation: _pendingInvitation,
+    requestPollError: _requestPollError,
     uptimeSec,
     earnedCredits: null,
     settlementConfigured: false,

@@ -191,23 +191,48 @@ async function getSession(sessionId) {
 }
 
 async function getPendingRequestsForProvider(providerId) {
+  if (!providerId) return [];
   const client = getClient();
-  const command = new QueryCommand({
-    TableName: 'c3_sessions',
-    IndexName: 'providerId-status-index',
-    KeyConditionExpression: 'providerId = :p AND #status = :s',
-    ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: marshall({
-      ':p': providerId,
-      ':s': 'PENDING',
-    }),
-  });
-
   try {
-    const response = await client.send(command);
-    return response.Items ? response.Items.map(item => unmarshall(item)) : [];
-  } catch (_) {
-    return [];
+    const items = [];
+    let exclusiveStartKey;
+    do {
+      const response = await client.send(new QueryCommand({
+        TableName: 'c3_sessions',
+        IndexName: 'providerId-status-index',
+        KeyConditionExpression: 'providerId = :p AND #status = :s',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: marshall({ ':p': providerId, ':s': 'PENDING' }),
+        ExclusiveStartKey: exclusiveStartKey,
+      }));
+      if (response.Items) items.push(...response.Items.map(item => unmarshall(item)));
+      exclusiveStartKey = response.LastEvaluatedKey;
+    } while (exclusiveStartKey);
+    return items;
+  } catch (indexError) {
+    // Older deployments may not have the providerId-status GSI yet. Scan as
+    // a compatibility fallback so a successfully written request still gets
+    // delivered; keep errors visible if both permissions/paths fail.
+    try {
+      const items = [];
+      let exclusiveStartKey;
+      do {
+        const response = await client.send(new ScanCommand({
+          TableName: 'c3_sessions',
+          FilterExpression: 'providerId = :p AND #status = :s',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: marshall({ ':p': providerId, ':s': 'PENDING' }),
+          ExclusiveStartKey: exclusiveStartKey,
+        }));
+        if (response.Items) items.push(...response.Items.map(item => unmarshall(item)));
+        exclusiveStartKey = response.LastEvaluatedKey;
+      } while (exclusiveStartKey);
+      return items;
+    } catch (scanError) {
+      const error = new Error(`Could not check provider requests. Index lookup failed: ${indexError.message}. Fallback lookup failed: ${scanError.message}`);
+      error.cause = scanError;
+      throw error;
+    }
   }
 }
 
