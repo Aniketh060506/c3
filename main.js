@@ -9,6 +9,7 @@ const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 const cognito = require('./core/cognito');
 const dynamodb = require('./core/dynamodb');
@@ -25,6 +26,23 @@ let mainWindow = null;
 let sessionRestorePromise = Promise.resolve(false);
 const PROFILE_FILE = path.join(app.getPath('userData'), 'c3_profile.json');
 const SESSION_FILE = path.join(app.getPath('userData'), 'c3_session.json');
+const PROVIDER_IDS_FILE = path.join(app.getPath('userData'), 'c3_provider_ids.json');
+
+function getProviderInstanceId(ownerUserId) {
+  let ids = {};
+  try {
+    ids = JSON.parse(fs.readFileSync(PROVIDER_IDS_FILE, 'utf8'));
+    if (!ids || typeof ids !== 'object' || Array.isArray(ids)) ids = {};
+  } catch (_) {}
+  if (typeof ids[ownerUserId] === 'string' && /^provider-[a-f0-9-]{16,64}$/.test(ids[ownerUserId])) {
+    return ids[ownerUserId];
+  }
+  const providerId = `provider-${crypto.randomUUID()}`;
+  ids[ownerUserId] = providerId;
+  try { fs.writeFileSync(PROVIDER_IDS_FILE, JSON.stringify(ids, null, 2), { mode: 0o600 }); }
+  catch (err) { console.warn('[provider] Could not persist this device ID:', err.message); }
+  return providerId;
+}
 
 settingsManager.initUserDataDir(app.getPath('userData'));
 
@@ -297,7 +315,7 @@ async function getAuthorizedNegotiationSession(sessionId) {
     throw new Error('Invalid request ID.');
   }
   const session = await dynamodb.getSession(sessionId);
-  if (!session || ![session.consumerId, session.providerId].includes(userId)) {
+  if (!session || (session.consumerId !== userId && session.providerOwnerId !== userId && session.providerId !== userId)) {
     throw new Error('You are not a participant in this provider request.');
   }
   return { userId, session };
@@ -362,7 +380,7 @@ ipcMain.handle('negotiation:accept-offer', async (_e, { sessionId, offerPerHour 
 // ── IPC Handlers: Phase 3 Provider Mode ──
 ipcMain.handle('provider:start-sharing', async (_e, config) => {
   const userId = cognito.getUserId() || `node-${os.hostname()}`;
-  return await providerDaemon.startSharing(userId, config);
+  return await providerDaemon.startSharing(userId, { ...config, providerId: getProviderInstanceId(userId) });
 });
 
 ipcMain.handle('provider:stop-sharing', async () => {
@@ -383,7 +401,7 @@ ipcMain.handle('provider:get-state', () => {
 
 // ── IPC Handlers: Phase 4 Consumer Studio ──
 ipcMain.handle('consumer:discover-nodes', async () => {
-  return await clusterOrchestrator.discoverNodes();
+  return await clusterOrchestrator.discoverNodes(cognito.getUserId());
 });
 
 ipcMain.handle('consumer:pick-folder', async () => {

@@ -158,7 +158,7 @@ function notifyUI(channel, data) {
 }
 
 // ── 1. Discover Nodes (Dual Channel: LAN UDP + DynamoDB Cloud) ──────────────
-async function discoverNodes() {
+async function discoverNodes(currentUserId = null) {
   const specs = await hardware.getHardwareSpecs();
   const live = await hardware.getLiveStats();
   const tailscale = await setupChecker.checkTailscale();
@@ -195,10 +195,11 @@ async function discoverNodes() {
       client.on('message', (msg, rinfo) => {
         try {
           const data = JSON.parse(msg.toString());
-          if (data.type === 'c3-beacon' && data.hostname !== specs.hostname) {
-            const nodeId = data.userId || `lan-${rinfo.address}`;
+          if (data.type === 'c3-beacon' && data.hostname !== specs.hostname && rinfo.address !== selfIp) {
+            const nodeId = data.providerId || data.userId || `lan-${rinfo.address}`;
             foundMap.set(nodeId, {
               id: nodeId,
+              ownerUserId: data.ownerUserId || null,
               hostname: data.hostname || 'LAN Peer',
               isSelf: false,
               cpuModel: data.cpuModel || null,
@@ -235,8 +236,9 @@ async function discoverNodes() {
   try {
     const cloudProviders = await dynamodb.getActiveProviders();
     for (const p of cloudProviders) {
-      if (p.hostname !== specs.hostname && p.userId) {
-        const existing = foundMap.get(p.userId);
+      if (p.userId) {
+        const providerId = p.providerId || p.userId;
+        const existing = foundMap.get(providerId);
         if (!existing) {
           const hostAliases = value => {
             const shortName = String(value || '').trim().replace(/\.$/, '').split('.')[0].toLowerCase();
@@ -255,8 +257,16 @@ async function discoverNodes() {
           // peer names so we never silently connect to another device.
           const livePeerIp = matchingPeers.length === 1 ? matchingPeers[0].ips?.[0] : null;
           const meshIp = livePeerIp || p.tailscaleIp || null;
-          foundMap.set(p.userId, {
-            id: p.userId,
+          // Old builds keyed every device under the Cognito user ID. Ignore
+          // that legacy self-row and any stale endpoint that now resolves to
+          // this consumer machine; new builds publish a per-device providerId.
+          const legacySelfRow = currentUserId && p.userId === currentUserId && !p.providerId;
+          const sameTailscaleHost = Boolean(selfMeshIp && meshIp === selfMeshIp);
+          const sameLanHost = Boolean(selfIp && p.localIp && p.localIp === selfIp);
+          if (legacySelfRow || sameTailscaleHost || sameLanHost) continue;
+          foundMap.set(providerId, {
+            id: providerId,
+            ownerUserId: p.ownerUserId || null,
             hostname: p.hostname || 'Cloud Peer',
             isSelf: false,
             cpuModel: p.cpuModel || null,
@@ -526,6 +536,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
             consumerId: invitation.consumerId,
             consumerName: invitation.consumerName,
             providerId: node.id,
+            providerOwnerId: node.ownerUserId || null,
             providerName: node.hostname,
             masterIp,
             workerNodeIp: invitation.workerNodeIp,
@@ -554,6 +565,7 @@ async function startCluster({ selectedNodes = [], workspacePath, userId, consume
           consumerId: userId || 'local-consumer',
           consumerName: consumerName || specs.hostname,
           providerId: node.id,
+          providerOwnerId: node.ownerUserId || null,
           masterIp,
           clusterToken,
           workerNodeIp: invitation.workerNodeIp,

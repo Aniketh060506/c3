@@ -18,6 +18,7 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const os = require('os');
 const net = require('net');
+const crypto = require('crypto');
 const dynamodb = require('./dynamodb');
 const hardware = require('./hardware');
 const setupChecker = require('./setup-checker');
@@ -78,6 +79,8 @@ function canReachK3sApi(host, timeout = 2500) {
 
 function getRegistryProfile() {
   return {
+    providerId: _config.providerId,
+    ownerUserId: _config.ownerUserId,
     hostname: _config.hostname,
     cpuModel: _config.cpuModel,
     physicalCores: _config.physicalCores,
@@ -118,13 +121,22 @@ async function startSharing(userId, config = {}) {
   const gpuEnabled = config.gpuEnabled ?? (specs.gpuModel && specs.gpuModel !== 'None');
   const requestedRate = Number(config.pricePerHour);
   const pricePerHour = Number.isFinite(requestedRate) && requestedRate > 0 ? requestedRate : null;
+  const providerId = config.providerId || `provider-${crypto.createHash('sha256')
+    .update(`${userId}|${os.hostname()}`)
+    .digest('hex')
+    .slice(0, 32)}`;
 
   _config = {
     cores,
     ramGb,
     gpuEnabled,
     pricePerHour,
-    userId,
+    // c3_providers is keyed by its userId partition key. Use a stable
+    // per-installation provider ID there, while keeping the Cognito owner ID
+    // separately so one account can safely share multiple computers.
+    userId: providerId,
+    providerId,
+    ownerUserId: userId,
     hostname: specs.hostname || os.hostname(),
     cpuModel: specs.cpuModel,
     physicalCores: specs.cpuPhysicalCores,
@@ -143,8 +155,14 @@ async function startSharing(userId, config = {}) {
 
   // 1. Register with DynamoDB
   try {
-    await dynamodb.registerProvider(userId, getRegistryProfile());
+    await dynamodb.registerProvider(providerId, getRegistryProfile());
     _cloudRegistered = true;
+    // Retire the pre-device-ID row. Older app builds keyed providers directly
+    // by Cognito user ID, causing multiple computers on one account to overwrite
+    // one another's addresses and capacity.
+    if (providerId !== userId) {
+      try { await dynamodb.updateProviderStatus(userId, 'OFFLINE'); } catch (_) {}
+    }
   } catch (err) {
     _cloudRegistered = false;
     console.warn('[provider] DynamoDB registration notice:', err.message);
@@ -166,10 +184,13 @@ async function startSharing(userId, config = {}) {
         : null;
       _config.localIp = currentStats.network?.ip || _config.localIp;
       if (_cloudRegistered) {
-        await dynamodb.heartbeat(userId, getRegistryProfile());
+        await dynamodb.heartbeat(providerId, getRegistryProfile());
       } else {
-        await dynamodb.registerProvider(userId, getRegistryProfile());
+        await dynamodb.registerProvider(providerId, getRegistryProfile());
         _cloudRegistered = true;
+        if (providerId !== userId) {
+          try { await dynamodb.updateProviderStatus(userId, 'OFFLINE'); } catch (_) {}
+        }
       }
     } catch (err) {
       _cloudRegistered = false;
@@ -190,7 +211,8 @@ async function startSharing(userId, config = {}) {
       if (!_sharing || !_udpSocket) return;
       const beaconMsg = JSON.stringify({
         type: 'c3-beacon',
-        userId: _config.userId,
+        userId: _config.providerId,
+        ownerUserId: _config.ownerUserId,
         hostname: _config.hostname,
         cpuModel: _config.cpuModel,
         cores: _config.cores,
@@ -326,7 +348,7 @@ async function startSharing(userId, config = {}) {
       try { _httpServer.close(); } catch (_) {}
       _httpServer = null;
     }
-    try { await dynamodb.updateProviderStatus(userId, 'OFFLINE'); } catch (_) {}
+    try { await dynamodb.updateProviderStatus(providerId, 'OFFLINE'); } catch (_) {}
     _cloudRegistered = false;
     throw new Error(`Provider RPC could not bind port ${RPC_PORT}: ${err.message}`);
   }
@@ -340,7 +362,7 @@ async function startSharing(userId, config = {}) {
         if (session?.status === 'STOPPED' || session?.status === 'DECLINED') await stopActiveSession();
         return;
       }
-      const pending = await dynamodb.getPendingRequestsForProvider(userId);
+      const pending = await dynamodb.getPendingRequestsForProvider(providerId);
       if (pending && pending.length > 0) {
         const reqItem = pending[0];
         notifyUI('provider:invitation-received', {
@@ -369,6 +391,9 @@ async function startSharing(userId, config = {}) {
 // ── 2. Accept Session & Launch Privileged K3s Worker ─────────────────────────
 async function acceptSession(sessionData) {
   if (!_sharing) throw new Error('Provider sharing is not active.');
+  if (sessionData.providerId && sessionData.providerId !== _config.providerId) {
+    throw new Error('This request was sent to a different provider device. Rescan providers and accept the matching request.');
+  }
   const { sessionId, masterIp, clusterToken, gpuEnabled } = sessionData;
   const flannelBackend = sessionData.flannelBackend === 'wireguard-native' ? 'wireguard-native' : 'vxlan';
   // Older pending invitations did not persist workerNodeIp. Recover the
@@ -525,9 +550,9 @@ async function stopSharing() {
   }
 
   // Update DynamoDB
-  if (_config?.userId) {
+  if (_config?.providerId) {
     try {
-      await dynamodb.updateProviderStatus(_config.userId, 'OFFLINE');
+      await dynamodb.updateProviderStatus(_config.providerId, 'OFFLINE');
     } catch (_) {}
   }
 
