@@ -21,7 +21,7 @@ export const Route = createFileRoute("/chat")({
 
 function Chat() {
   const [threads, setThreads] = useState(seed);
-  const [active, setActive] = useState(seed[0].providerId);
+  const [active, setActive] = useState(seed[0]!.providerId);
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const thread = threads.find((t) => t.providerId === active)!;

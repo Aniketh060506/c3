@@ -8,7 +8,7 @@ export function useLiveSeries(base: number, spread = 15, length = 32, ms = 1100)
   useEffect(() => {
     const id = setInterval(() => {
       setData((prev) => {
-        const last = prev[prev.length - 1];
+        const last = prev[prev.length - 1]!;
         const next = Math.max(2, Math.min(98, last.v + (Math.random() - 0.5) * spread));
         const pulled = next + (base - next) * 0.15;
         return [...prev.slice(1), { t: last.t + 1, v: pulled }];

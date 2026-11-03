@@ -75,7 +75,7 @@ function TerminalPage() {
               {active === t.id && <motion.span layoutId="term-tab" className="absolute inset-0 rounded-t-xl bg-ink-foreground/10" />}
               <span className="relative size-1.5 rounded-full bg-success" />
               <span className="relative">{t.target}</span>
-              {tabs.length > 1 && <X className="relative size-3 opacity-60 hover:opacity-100" onClick={(e) => { e.stopPropagation(); setTabs((ts) => ts.filter((x) => x.id !== t.id)); if (active === t.id) setActive(tabs[0].id === t.id ? tabs[1].id : tabs[0].id); }} />}
+              {tabs.length > 1 && <X className="relative size-3 opacity-60 hover:opacity-100" onClick={(e) => { e.stopPropagation(); setTabs((ts) => ts.filter((x) => x.id !== t.id)); if (active === t.id) setActive(tabs[0]!.id === t.id ? tabs[1]!.id : tabs[0]!.id); }} />}
             </button>
           ))}
           <button className="ml-auto mb-2 flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-ink-foreground/60 hover:text-ink-foreground" onClick={() => setTabs((ts) => ts.map((t) => (t.id === active ? { ...t, lines: [...t.lines, { kind: "ok", text: "Reconnected." }] } : t)))}><RotateCw className="size-3" />Reconnect</button>
@@ -94,8 +94,8 @@ function TerminalPage() {
             <input id="term-in" autoFocus value={input} onChange={(e) => setInput(e.target.value)} spellCheck={false}
               onKeyDown={(e) => {
                 if (e.key === "Enter") run();
-                if (e.key === "ArrowUp" && hist.length) { const n = Math.min(hist.length - 1, hIdx + 1); setHIdx(n); setInput(hist[n]); }
-                if (e.key === "ArrowDown") { const n = Math.max(-1, hIdx - 1); setHIdx(n); setInput(n < 0 ? "" : hist[n]); }
+                if (e.key === "ArrowUp" && hist.length) { const n = Math.min(hist.length - 1, hIdx + 1); setHIdx(n); setInput(hist[n] ?? ""); }
+                if (e.key === "ArrowDown") { const n = Math.max(-1, hIdx - 1); setHIdx(n); setInput(n < 0 ? "" : (hist[n] ?? "")); }
               }}
               className="flex-1 bg-transparent caret-accent outline-none" aria-label="Terminal input" />
           </div>

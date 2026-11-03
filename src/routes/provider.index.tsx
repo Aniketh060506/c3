@@ -72,7 +72,7 @@ function ProviderDash() {
         <Panel delay={0.05}>
           <h2 className="mb-4 text-lg font-bold">Live usage</h2>
           <div className="flex items-center justify-around">
-            <Ring value={usage[usage.length - 1].v} size={110} stroke={11}><div><p className="text-xs text-muted-foreground">CPU</p><p className="font-display text-xl font-bold">{Math.round(usage[usage.length - 1].v)}%</p></div></Ring>
+            <Ring value={usage[usage.length - 1]!.v} size={110} stroke={11}><div><p className="text-xs text-muted-foreground">CPU</p><p className="font-display text-xl font-bold">{Math.round(usage[usage.length - 1]!.v)}%</p></div></Ring>
             <Ring value={sharing ? 61 : 4} size={110} stroke={11} tone="accent"><div><p className="text-xs text-muted-foreground">GPU</p><p className="font-display text-xl font-bold">{sharing ? 61 : 4}%</p></div></Ring>
           </div>
           <div className="mt-4"><Spark data={usage} /></div>
@@ -103,7 +103,7 @@ function Limit({ label, v, max, set, unit }: { label: string; v: number; max: nu
   return (
     <div className="mb-5">
       <div className="mb-2 flex justify-between text-sm"><span className="font-semibold">{label}</span><span className="font-mono font-bold">{v} <span className="text-muted-foreground">{unit}</span></span></div>
-      <Slider value={[v]} min={0} max={max} step={1} onValueChange={([x]) => set(x)} />
+      <Slider value={[v]} min={0} max={max} step={1} onValueChange={([x]) => set(x ?? 0)} />
     </div>
   );
 }

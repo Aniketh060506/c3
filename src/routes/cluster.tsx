@@ -24,7 +24,7 @@ function Cluster() {
   const cpu = useLiveSeries(62, 10);
   const gpu = useLiveSeries(78, 8);
   const t = useTicker();
-  const [sel, setSel] = useState(nodes[1].id);
+  const [sel, setSel] = useState(nodes[1]!.id);
   const node = nodes.find((n) => n.id === sel)!;
   const mins = 72 + Math.floor(t / 60);
   const totalCpu = nodes.reduce((a, n) => a + n.cpu, 0);
@@ -47,7 +47,7 @@ function Cluster() {
         <Panel delay={0.1}><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">GPU</p><p className="font-display text-3xl font-bold">3 <span className="text-sm text-muted-foreground">devices</span></p><Spark data={gpu} tone="success" /></Panel>
         <Panel delay={0.15} className="flex items-center justify-between">
           <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Pods</p><p className="font-display text-3xl font-bold">{pods.filter((p) => p.status === "Running").length}<span className="text-sm text-muted-foreground">/{pods.length}</span></p><p className="text-xs text-muted-foreground">2 jobs running</p></div>
-          <Ring value={gpu[gpu.length - 1].v} tone="success"><span className="text-xs font-bold">VRAM</span></Ring>
+          <Ring value={gpu[gpu.length - 1]!.v} tone="success"><span className="text-xs font-bold">VRAM</span></Ring>
         </Panel>
       </div>
 
@@ -93,7 +93,7 @@ function Topology({ sel, onSel }: { sel: string; onSel: (id: string) => void }) 
     <div className="dot-grid relative aspect-[16/10] w-full rounded-3xl bg-muted">
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 size-full">
         {nodes.filter((n) => n.id !== "cp").map((n, i) => {
-          const [x, y] = pos[n.id];
+          const [x, y] = pos[n.id]!;
           const d = `M50 50 L${x} ${y}`;
           return (
             <g key={n.id}>
@@ -106,7 +106,7 @@ function Topology({ sel, onSel }: { sel: string; onSel: (id: string) => void }) 
         })}
       </svg>
       {nodes.map((n) => {
-        const [x, y] = pos[n.id];
+        const [x, y] = pos[n.id]!;
         return (
           <motion.button key={n.id} onClick={() => onSel(n.id)} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.95 }}
             className={cn("absolute -translate-x-1/2 -translate-y-1/2 rounded-2xl border-2 bg-card px-3 py-2 text-left shadow-soft transition-colors", sel === n.id ? "border-primary shadow-lift" : "border-transparent")}

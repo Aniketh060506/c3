@@ -9,8 +9,8 @@ export function isTauri(): boolean {
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
   if (!isTauri()) return null;
   const mod = "@tauri-apps/api/core";
-  const { invoke } = await import(/* @vite-ignore */ mod);
-  return invoke<T>(cmd, args);
+  const m = (await import(/* @vite-ignore */ mod)) as { invoke: (c: string, a?: unknown) => Promise<T> };
+  return m.invoke(cmd, args);
 }
 
 export const hardwareService = {
