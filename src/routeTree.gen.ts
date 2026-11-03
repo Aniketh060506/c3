@@ -10,33 +10,128 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ChatRouteImport } from './routes/chat'
+import { Route as ClusterRouteImport } from './routes/cluster'
+import { Route as MarketplaceRouteImport } from './routes/marketplace'
+import { Route as TerminalRouteImport } from './routes/terminal'
+import { Route as ProviderIndexRouteImport } from './routes/provider.index'
+import { Route as ProviderRequestsRouteImport } from './routes/provider.requests'
+import { Route as ProvidersIdRouteImport } from './routes/providers.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChatRoute = ChatRouteImport.update({
+  id: '/chat',
+  path: '/chat',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ClusterRoute = ClusterRouteImport.update({
+  id: '/cluster',
+  path: '/cluster',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MarketplaceRoute = MarketplaceRouteImport.update({
+  id: '/marketplace',
+  path: '/marketplace',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TerminalRoute = TerminalRouteImport.update({
+  id: '/terminal',
+  path: '/terminal',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProviderIndexRoute = ProviderIndexRouteImport.update({
+  id: '/provider/',
+  path: '/provider/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProviderRequestsRoute = ProviderRequestsRouteImport.update({
+  id: '/provider/requests',
+  path: '/provider/requests',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProvidersIdRoute = ProvidersIdRouteImport.update({
+  id: '/providers/$id',
+  path: '/providers/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/chat': typeof ChatRoute
+  '/cluster': typeof ClusterRoute
+  '/marketplace': typeof MarketplaceRoute
+  '/terminal': typeof TerminalRoute
+  '/provider/requests': typeof ProviderRequestsRoute
+  '/providers/$id': typeof ProvidersIdRoute
+  '/provider/': typeof ProviderIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/chat': typeof ChatRoute
+  '/cluster': typeof ClusterRoute
+  '/marketplace': typeof MarketplaceRoute
+  '/terminal': typeof TerminalRoute
+  '/provider/requests': typeof ProviderRequestsRoute
+  '/providers/$id': typeof ProvidersIdRoute
+  '/provider': typeof ProviderIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/chat': typeof ChatRoute
+  '/cluster': typeof ClusterRoute
+  '/marketplace': typeof MarketplaceRoute
+  '/terminal': typeof TerminalRoute
+  '/provider/requests': typeof ProviderRequestsRoute
+  '/providers/$id': typeof ProvidersIdRoute
+  '/provider/': typeof ProviderIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/chat'
+    | '/cluster'
+    | '/marketplace'
+    | '/terminal'
+    | '/provider/requests'
+    | '/providers/$id'
+    | '/provider/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/chat'
+    | '/cluster'
+    | '/marketplace'
+    | '/terminal'
+    | '/provider/requests'
+    | '/providers/$id'
+    | '/provider'
+  id:
+    | '__root__'
+    | '/'
+    | '/chat'
+    | '/cluster'
+    | '/marketplace'
+    | '/terminal'
+    | '/provider/requests'
+    | '/providers/$id'
+    | '/provider/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ChatRoute: typeof ChatRoute
+  ClusterRoute: typeof ClusterRoute
+  MarketplaceRoute: typeof MarketplaceRoute
+  TerminalRoute: typeof TerminalRoute
+  ProviderRequestsRoute: typeof ProviderRequestsRoute
+  ProvidersIdRoute: typeof ProvidersIdRoute
+  ProviderIndexRoute: typeof ProviderIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +143,67 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/chat': {
+      id: '/chat'
+      path: '/chat'
+      fullPath: '/chat'
+      preLoaderRoute: typeof ChatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cluster': {
+      id: '/cluster'
+      path: '/cluster'
+      fullPath: '/cluster'
+      preLoaderRoute: typeof ClusterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/marketplace': {
+      id: '/marketplace'
+      path: '/marketplace'
+      fullPath: '/marketplace'
+      preLoaderRoute: typeof MarketplaceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/terminal': {
+      id: '/terminal'
+      path: '/terminal'
+      fullPath: '/terminal'
+      preLoaderRoute: typeof TerminalRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/provider/': {
+      id: '/provider/'
+      path: '/provider'
+      fullPath: '/provider/'
+      preLoaderRoute: typeof ProviderIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/provider/requests': {
+      id: '/provider/requests'
+      path: '/provider/requests'
+      fullPath: '/provider/requests'
+      preLoaderRoute: typeof ProviderRequestsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/providers/$id': {
+      id: '/providers/$id'
+      path: '/providers/$id'
+      fullPath: '/providers/$id'
+      preLoaderRoute: typeof ProvidersIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ChatRoute: ChatRoute,
+  ClusterRoute: ClusterRoute,
+  MarketplaceRoute: MarketplaceRoute,
+  TerminalRoute: TerminalRoute,
+  ProviderRequestsRoute: ProviderRequestsRoute,
+  ProvidersIdRoute: ProvidersIdRoute,
+  ProviderIndexRoute: ProviderIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
