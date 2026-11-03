@@ -123,7 +123,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function NavItem({ to, label, icon: Icon, active, badge }: { to: string; label: string; icon: typeof Cpu; active: boolean; badge?: number }) {
+function NavItem({ to, label, icon: Icon, active, badge }: { to: string; label: string; icon: typeof Cpu; active: boolean; badge?: number | undefined }) {
   return (
     <Link to={to} className={cn("relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors", active ? "text-primary" : "text-muted-foreground hover:text-foreground")}>
       {active && <motion.span layoutId="nav-pill" className="absolute inset-0 -z-0 rounded-xl bg-primary-soft" transition={{ type: "spring", stiffness: 420, damping: 34 }} />}

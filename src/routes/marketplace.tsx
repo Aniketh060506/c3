@@ -54,8 +54,8 @@ function Marketplace() {
           <Search className="size-4 text-muted-foreground" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by name, CPU, GPU or city" className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground" />
         </label>
-        <Need label="CPU cores" value={`${cores}`} unit="cores"><Slider value={[cores]} min={1} max={32} step={1} onValueChange={([v]) => setCores(v)} /></Need>
-        <Need label="Memory" value={`${ram}`} unit="GB"><Slider value={[ram]} min={2} max={192} step={2} onValueChange={([v]) => setRam(v)} /></Need>
+        <Need label="CPU cores" value={`${cores}`} unit="cores"><Slider value={[cores]} min={1} max={32} step={1} onValueChange={([v]) => setCores(v ?? 0)} /></Need>
+        <Need label="Memory" value={`${ram}`} unit="GB"><Slider value={[ram]} min={2} max={192} step={2} onValueChange={([v]) => setRam(v ?? 0)} /></Need>
         <div className="rounded-2xl border border-border p-4">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">GPU</p>
           <div className="relative grid grid-cols-2 rounded-xl bg-muted p-1 text-sm font-semibold">

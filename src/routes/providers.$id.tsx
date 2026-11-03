@@ -127,7 +127,7 @@ function Knob({ label, v, max, min = 1, set }: { label: string; v: number; max: 
   return (
     <div>
       <div className="mb-2 flex justify-between text-sm"><span className="font-semibold">{label}</span><span className="font-mono font-bold">{v}<span className="text-muted-foreground">/{max}</span></span></div>
-      <Slider value={[v]} min={min} max={max} step={1} onValueChange={([x]) => set(x)} />
+      <Slider value={[v]} min={min} max={max} step={1} onValueChange={([x]) => set(x ?? 0)} />
     </div>
   );
 }

@@ -36,9 +36,9 @@ function Overview() {
   const gpu = useLiveSeries(22, 18);
   const [deps, setDeps] = useState<Dep[]>(dependencies);
   const [open, setOpen] = useState<Dep | null>(null);
-  const cpuNow = cpu[cpu.length - 1].v;
-  const ramNow = ram[ram.length - 1].v;
-  const gpuNow = gpu[gpu.length - 1].v;
+  const cpuNow = cpu[cpu.length - 1]!.v;
+  const ramNow = ram[ram.length - 1]!.v;
+  const gpuNow = gpu[gpu.length - 1]!.v;
   const ready = deps.filter((d) => d.status === "installed").length;
   const h = myHardware;
 
