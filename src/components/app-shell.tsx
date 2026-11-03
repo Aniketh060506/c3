@@ -1,7 +1,7 @@
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
 import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 import {
-  Bell, Boxes, Cpu, LayoutGrid, MessageCircle, Network, Search, Store, Terminal, Wallet, Inbox, Gauge, Settings,
+  Bell, Boxes, Cpu, LayoutGrid, MessageCircle, Network, Search, Store, Terminal, Inbox, Gauge, Settings,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
@@ -134,4 +134,3 @@ function NavItem({ to, label, icon: Icon, active, badge }: { to: string; label: 
   );
 }
 
-export { Wallet };
