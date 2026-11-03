@@ -1,14 +1,27 @@
-# Welcome to your Lovable project
+# Motion Market Meadow
+
+Tauri 2 + React + TypeScript tech stack 
+
+
+also use mst moder animation movemntsn 
+
+DO NOT USE CYBERPUNK AND @connector:neon:"Neon" COLORS 
+
+i want moders bright rounded design professions like a moder markeplace websitews nice scen
+
+cool motion animations like anuthing ates tech for that unique imlemegtaions of the feature do not make regular think diffrenly approach it uniquely
 
 This project was built with [Lovable](https://lovable.dev).
 
+**Live app**: https://motion-market-meadow.lovable.app
+
 ## Build with Lovable
 
-Open your project in the [Lovable editor](https://lovable.dev) and keep building.
+Continue developing this project in the [Lovable editor](https://lovable.dev/projects/b3e1f74d-d1bf-44dd-94d1-83f1b6453ce8).
 
 - **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: connect the project to GitHub and every change made in Lovable is committed straight to your repository.
-- **Full ownership**: this code is yours. Push to your repository and your changes sync back into Lovable, ready for your next prompt.
+- **Stay in sync**: every change made in Lovable is committed straight to this repository.
+- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
 
 ## Development
 
@@ -20,10 +33,3 @@ cd <repository-name>
 npm i
 npm run dev
 ```
-
-## Built with
-
-- TanStack Start
-- TypeScript
-- React
-- Tailwind CSS
