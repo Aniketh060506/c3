@@ -63,7 +63,7 @@
 
 :root {
   --radius: 1.25rem;
-  --background: oklch(0.985 0.006 85);
+  --background: oklch(0.995 0.002 255);
   --foreground: oklch(0.2 0.03 265);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.2 0.03 265);
@@ -71,26 +71,26 @@
   --popover-foreground: oklch(0.2 0.03 265);
   --primary: oklch(0.55 0.2 262);
   --primary-foreground: oklch(0.99 0 0);
-  --primary-soft: oklch(0.94 0.04 262);
-  --secondary: oklch(0.955 0.012 85);
+  --primary-soft: oklch(0.96 0.025 262);
+  --secondary: oklch(0.975 0.003 255);
   --secondary-foreground: oklch(0.25 0.03 265);
-  --muted: oklch(0.96 0.008 85);
+  --muted: oklch(0.97 0.004 255);
   --muted-foreground: oklch(0.52 0.025 265);
   --accent: oklch(0.72 0.17 50);
   --accent-foreground: oklch(0.99 0 0);
-  --accent-soft: oklch(0.95 0.045 60);
+  --accent-soft: oklch(0.97 0.025 65);
   --success: oklch(0.66 0.15 158);
   --success-soft: oklch(0.95 0.045 158);
   --warning: oklch(0.78 0.14 80);
-  --warning-soft: oklch(0.96 0.05 85);
+  --warning-soft: oklch(0.98 0.025 85);
   --destructive: oklch(0.62 0.2 25);
   --destructive-foreground: oklch(0.99 0 0);
-  --destructive-soft: oklch(0.95 0.04 25);
-  --border: oklch(0.91 0.01 85);
-  --input: oklch(0.91 0.01 85);
+  --destructive-soft: oklch(0.97 0.025 25);
+  --border: oklch(0.91 0.012 255);
+  --input: oklch(0.89 0.012 255);
   --ring: oklch(0.55 0.2 262);
   --ink: oklch(0.2 0.03 265);
-  --ink-foreground: oklch(0.96 0.01 85);
+  --ink-foreground: oklch(0.98 0.004 255);
   --chart-1: oklch(0.55 0.2 262);
   --chart-2: oklch(0.72 0.17 50);
   --chart-3: oklch(0.66 0.15 158);
@@ -100,13 +100,13 @@
   --sidebar-foreground: oklch(0.2 0.03 265);
   --sidebar-primary: oklch(0.55 0.2 262);
   --sidebar-primary-foreground: oklch(0.99 0 0);
-  --sidebar-accent: oklch(0.96 0.008 85);
+  --sidebar-accent: oklch(0.97 0.004 255);
   --sidebar-accent-foreground: oklch(0.2 0.03 265);
   --sidebar-border: oklch(0.91 0.01 85);
   --sidebar-ring: oklch(0.55 0.2 262);
-  --shadow-soft: 0 1px 2px oklch(0.2 0.03 265 / 4%), 0 8px 24px -12px oklch(0.2 0.03 265 / 12%);
-  --shadow-lift: 0 2px 4px oklch(0.2 0.03 265 / 4%), 0 24px 48px -20px oklch(0.55 0.2 262 / 28%);
-  --gradient-hero: radial-gradient(120% 120% at 0% 0%, oklch(0.94 0.04 262) 0%, transparent 50%), radial-gradient(100% 100% at 100% 0%, oklch(0.95 0.045 60) 0%, transparent 55%);
+  --shadow-soft: 0 1px 2px oklch(0.2 0.03 265 / 3%), 0 10px 28px -14px oklch(0.3 0.04 265 / 14%);
+  --shadow-lift: 0 4px 8px oklch(0.2 0.03 265 / 4%), 0 24px 48px -20px oklch(0.55 0.2 262 / 24%);
+  --gradient-hero: radial-gradient(100% 140% at 0% 0%, oklch(0.96 0.025 262) 0%, transparent 56%), radial-gradient(90% 120% at 100% 0%, oklch(0.985 0.012 230) 0%, transparent 58%);
 }
 
 @theme inline {
@@ -147,10 +147,82 @@
     -webkit-font-smoothing: antialiased;
   }
   h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.02em; }
+  ::selection { background: oklch(0.86 0.09 262 / 55%); }
 }
 
 @layer components {
   .field {
     @apply mt-1 h-10 w-full rounded-xl border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-primary;
   }
+}
+
+@layer components {
+  .glass-card {
+    background: color-mix(in oklab, white 92%, var(--primary-soft));
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(16px);
+  }
+  .panel-halo {
+    background: radial-gradient(420px circle at 100% 0%, color-mix(in oklab, var(--primary) 8%, transparent), transparent 72%);
+  }
+  .panel-edge { background: linear-gradient(90deg, transparent, oklch(0.62 0.18 262 / 68%), oklch(0.72 0.16 195 / 58%), transparent); }
+  .panel-surface { transition: border-color 240ms ease, box-shadow 240ms ease, transform 240ms ease; }
+  .panel-surface:hover { border-color: color-mix(in oklab, var(--primary) 22%, var(--border)); }
+  .panel-surface svg.lucide {
+    transition: transform 240ms cubic-bezier(.2,.8,.2,1), filter 240ms ease;
+  }
+  .panel-surface:hover svg.lucide:not(.animate-spin) {
+    transform: translateY(-1px) scale(1.08) rotate(-3deg);
+    filter: drop-shadow(0 3px 5px oklch(0.55 0.2 262 / 20%));
+  }
+  .resource-icon {
+    background: linear-gradient(145deg, white, var(--primary-soft));
+    box-shadow: inset 0 1px 0 white, 0 5px 14px oklch(0.45 0.1 262 / 9%);
+  }
+  .hardware-card { isolation: isolate; transition: border-color 220ms ease, box-shadow 220ms ease; }
+  .hardware-card:hover { box-shadow: 0 18px 38px -22px color-mix(in oklab, currentColor 32%, transparent); }
+  .hardware-glow { z-index: -1; opacity: .18; animation: hardware-breathe 4.2s ease-in-out infinite; }
+  .hardware-card .resource-icon { transition: transform 240ms cubic-bezier(.2,.8,.2,1), box-shadow 240ms ease; }
+  .hardware-card:hover .resource-icon { transform: translateY(-2px) rotate(-4deg); box-shadow: 0 10px 22px -8px color-mix(in oklab, currentColor 38%, transparent); }
+  .hardware-cpu { color: oklch(0.62 0.19 42); border-color: oklch(0.91 0.045 48); background: linear-gradient(145deg, white 56%, oklch(0.985 0.025 58)); }
+  .hardware-cpu .hardware-glow { background: oklch(0.72 0.18 48); }
+  .hardware-cpu .resource-icon { border-color: oklch(0.9 0.06 52); background: linear-gradient(145deg, white, oklch(0.97 0.05 55)); }
+  .hardware-cpu .hardware-chip { color: oklch(0.57 0.17 42); background: oklch(0.96 0.055 55); }
+  .hardware-cpu .hardware-meter { background: linear-gradient(90deg, oklch(0.74 0.17 52), oklch(0.59 0.2 34)); }
+  .hardware-memory { color: oklch(0.5 0.13 157); border-color: oklch(0.9 0.045 157); background: linear-gradient(145deg, white 56%, oklch(0.985 0.02 158)); }
+  .hardware-memory .hardware-glow { background: oklch(0.7 0.15 157); }
+  .hardware-memory .resource-icon { border-color: oklch(0.88 0.06 157); background: linear-gradient(145deg, white, oklch(0.96 0.045 157)); }
+  .hardware-memory .hardware-chip { color: oklch(0.48 0.13 157); background: oklch(0.95 0.05 157); }
+  .hardware-memory .hardware-meter { background: linear-gradient(90deg, oklch(0.69 0.16 157), oklch(0.55 0.17 173)); }
+  .hardware-graphics { color: oklch(0.53 0.17 286); border-color: oklch(0.9 0.045 286); background: linear-gradient(145deg, white 56%, oklch(0.985 0.025 286)); }
+  .hardware-graphics .hardware-glow { background: oklch(0.7 0.17 286); }
+  .hardware-graphics .resource-icon { border-color: oklch(0.89 0.06 286); background: linear-gradient(145deg, white, oklch(0.96 0.05 286)); }
+  .hardware-graphics .hardware-chip { color: oklch(0.5 0.17 286); background: oklch(0.95 0.045 286); }
+  .hardware-graphics .hardware-meter { background: linear-gradient(90deg, oklch(0.68 0.17 286), oklch(0.58 0.2 254)); }
+  .hardware-storage { color: oklch(0.52 0.13 226); border-color: oklch(0.9 0.045 226); background: linear-gradient(145deg, white 56%, oklch(0.985 0.02 225)); }
+  .hardware-storage .hardware-glow { background: oklch(0.7 0.13 226); }
+  .hardware-storage .resource-icon { border-color: oklch(0.88 0.055 226); background: linear-gradient(145deg, white, oklch(0.96 0.045 226)); }
+  .hardware-storage .hardware-chip { color: oklch(0.5 0.13 226); background: oklch(0.95 0.045 226); }
+  .hardware-storage .hardware-meter { background: linear-gradient(90deg, oklch(0.68 0.14 226), oklch(0.57 0.16 245)); }
+  .icon-tile {
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 88%), 0 8px 18px -12px color-mix(in oklab, currentColor 42%, transparent);
+    transition: box-shadow 220ms ease, filter 220ms ease;
+  }
+  .icon-tile:hover {
+    box-shadow: inset 0 1px 0 white, 0 10px 20px -10px color-mix(in oklab, currentColor 48%, transparent);
+  }
+  .icon-tile svg { transition: transform 220ms cubic-bezier(.2,.8,.2,1); }
+  .icon-tile:hover svg { transform: scale(1.1); }
+  .nav-icon { transition: color 200ms ease, background-color 200ms ease, transform 200ms ease; }
+  .nav-item:hover .nav-icon { transform: translateX(2px) scale(1.05); }
+  .network-orbit { animation: orbit-drift 18s linear infinite; transform-origin: center; }
+  .network-pulse { animation: node-pulse 2.8s ease-in-out infinite; }
+}
+
+@keyframes orbit-drift { to { transform: rotate(360deg); } }
+@keyframes node-pulse { 0%, 100% { opacity: .45; transform: scale(.92); } 50% { opacity: 1; transform: scale(1.08); } }
+@keyframes hardware-breathe { 0%, 100% { transform: scale(.88); opacity: .12; } 50% { transform: scale(1.12); opacity: .24; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

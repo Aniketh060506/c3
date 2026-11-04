@@ -1,6 +1,7 @@
 import { motion, useMotionValue, useSpring, useTransform, animate } from "motion/react";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
+import { Cpu, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function Panel({ className, children, delay = 0 }: { className?: string; children: ReactNode; delay?: number }) {
@@ -9,8 +10,11 @@ export function Panel({ className, children, delay = 0 }: { className?: string; 
       initial={{ opacity: 0, y: 16, scale: 0.985 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 220, damping: 26, delay }}
-      className={cn("rounded-3xl border border-border bg-card p-5 shadow-soft", className)}
+      whileHover={{ y: -2, transition: { duration: 0.18 } }}
+      className={cn("panel-surface group relative isolate rounded-3xl border border-border bg-card p-5 shadow-soft transition-[border-color,box-shadow] duration-300 hover:border-primary/20 hover:shadow-lift", className)}
     >
+      <span aria-hidden="true" className="panel-halo pointer-events-none absolute inset-0 -z-10 rounded-[inherit] opacity-0 transition-opacity duration-500 group-hover:opacity-100" />
+      <span aria-hidden="true" className="panel-edge pointer-events-none absolute inset-x-6 top-0 h-px opacity-40 transition-all duration-300 group-hover:inset-x-3 group-hover:opacity-90" />
       {children}
     </motion.section>
   );
@@ -35,6 +39,27 @@ export function PageHeader({ eyebrow, title, children }: { eyebrow: string; titl
       {children}
     </div>
   );
+}
+
+const iconTone = {
+  blue: "bg-blue-50 text-blue-600 ring-blue-100",
+  cyan: "bg-cyan-50 text-cyan-700 ring-cyan-100",
+  violet: "bg-violet-50 text-violet-700 ring-violet-100",
+  green: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+  orange: "bg-orange-50 text-orange-700 ring-orange-100",
+  rose: "bg-rose-50 text-rose-700 ring-rose-100",
+  slate: "bg-slate-100 text-slate-600 ring-slate-200",
+} as const;
+
+export function IconTile({ icon: Icon, tone = "blue", size = "md", className }: { icon: typeof Cpu; tone?: keyof typeof iconTone; size?: "sm" | "md" | "lg"; className?: string }) {
+  const sizeClass = { sm: "size-8 rounded-xl", md: "size-11 rounded-2xl", lg: "size-14 rounded-[1.2rem]" }[size];
+  const iconClass = { sm: "size-4", md: "size-5", lg: "size-6" }[size];
+  return <motion.span whileHover={{ y: -2, rotate: -4, scale: 1.06 }} transition={{ type: "spring", stiffness: 380, damping: 18 }} className={cn("icon-tile inline-grid shrink-0 place-items-center ring-1 ring-inset", iconTone[tone], sizeClass, className)}><Icon className={iconClass} strokeWidth={2.1} /></motion.span>;
+}
+
+/** Consistent, icon-led card title that gives dense screens clearer landmarks. */
+export function CardHeading({ icon: Icon, tone = "blue", title, detail, className }: { icon: LucideIcon; tone?: keyof typeof iconTone; title: ReactNode; detail?: ReactNode; className?: string }) {
+  return <div className={cn("mb-4 flex items-center gap-3", className)}><IconTile icon={Icon} tone={tone} size="md" /><div className="min-w-0"><h2 className="text-lg font-bold leading-tight">{title}</h2>{detail && <p className="mt-1 text-sm text-muted-foreground">{detail}</p>}</div></div>;
 }
 
 /** Number that springs to its new value. */

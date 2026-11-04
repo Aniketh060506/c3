@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { ArrowLeft, Boxes, Cpu, LoaderCircle, MemoryStick, Play, Send, Terminal as TerminalIcon, Zap } from "lucide-react";
-import { PageHeader, Panel } from "@/components/kit";
+import { CardHeading, IconTile, PageHeader, Panel } from "@/components/kit";
 import { clusterService } from "@/lib/platform";
 
 export const Route = createFileRoute("/terminal")({
@@ -53,10 +53,9 @@ function InteractivePod() {
     <Link to="/cluster" search={{ clusterId }} className="mb-4 inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground"><ArrowLeft className="size-4" />Session dashboard</Link>
     <PageHeader eyebrow="Interactive compute · Kubernetes pod" title="Pod shell"><Link to="/batch-jobs" search={{ clusterId }} className="inline-flex items-center rounded-xl border border-border px-3 py-2 text-xs font-semibold"><Boxes className="mr-2 size-4" />Distributed workload</Link></PageHeader>
     {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}
-    <div className="grid gap-4 xl:grid-cols-[0.72fr_1.28fr]">
+    <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
       <Panel>
-        <h2 className="text-lg font-bold">Start an interactive pod</h2>
-        <p className="mb-5 mt-1 text-sm text-muted-foreground">Choose the image and per pod resource requests. Kubernetes schedules it on a node with matching free capacity.</p>
+        <CardHeading icon={Cpu} tone="blue" title="Start an interactive pod" detail="Choose its image and resource requests; Kubernetes finds a node with available capacity." />
         <form onSubmit={(e) => void start(e)} className="space-y-4">
           <Field label="Container image"><input required value={image} onChange={(e) => setImage(e.target.value)} className="field" placeholder="pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime" /></Field>
           <Field label="Kubernetes namespace"><input required value={namespace} onChange={(e) => setNamespace(e.target.value)} className="field" placeholder="default" /></Field>
@@ -68,11 +67,11 @@ function InteractivePod() {
           <div className="rounded-xl bg-muted p-3 text-xs leading-5 text-muted-foreground"><Cpu className="mr-2 inline size-3.5" />{cpu} CPU · <MemoryStick className="mx-1 inline size-3.5" />{memory} GiB · <Zap className="mx-1 inline size-3.5" />{gpu} GPU. These become Kubernetes requests and limits; GPU nodes need the NVIDIA device plugin installed.</div>
           <button disabled={busy || !image.trim()} className="inline-flex h-11 w-full items-center justify-center rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground disabled:opacity-50">{busy ? <LoaderCircle className="mr-2 size-4 animate-spin" /> : <Play className="mr-2 size-4" />}Start pod and open shell</button>
         </form>
-        {pod && <div className="mt-4 rounded-xl border border-success/30 bg-success-soft p-3 text-xs"><p className="font-semibold">Running pod</p><p className="mt-1 font-mono">{pod.namespace}/{pod.name}</p><p className="mt-1 break-all text-muted-foreground">{pod.image}</p></div>}
+        {pod && <div className="mt-4 flex items-start gap-3 rounded-2xl border border-success/30 bg-success-soft p-3 text-xs"><IconTile icon={Boxes} tone="green" size="sm" /><div><p className="font-semibold">Running pod</p><p className="mt-1 font-mono">{pod.namespace}/{pod.name}</p><p className="mt-1 break-all text-muted-foreground">{pod.image}</p></div></div>}
         <p className="mt-4 text-xs leading-5 text-muted-foreground">Uses the active kubectl context. Input and output folder mounting is configured with the distributed workload’s data transfer settings.</p>
       </Panel>
       <Panel className="overflow-hidden bg-ink p-0 text-ink-foreground">
-        <div className="flex items-center gap-2 border-b border-ink-foreground/10 px-4 py-3"><TerminalIcon className="size-4 text-primary" /><span className="font-mono text-xs">{pod ? `${pod.namespace}/${pod.name}` : "Pod terminal"}</span><span className="ml-auto rounded-full bg-ink-foreground/10 px-2 py-1 text-[10px]">{shellId ? "Connected" : busy ? "Starting pod" : "No pod"}</span></div>
+        <div className="flex items-center gap-3 border-b border-ink-foreground/10 px-4 py-3"><IconTile icon={TerminalIcon} tone="green" size="sm" /><span className="font-mono text-xs">{pod ? `${pod.namespace}/${pod.name}` : "Pod terminal"}</span><span className="ml-auto rounded-full bg-ink-foreground/10 px-2 py-1 text-[10px]">{shellId ? "Connected" : busy ? "Starting pod" : "No pod"}</span></div>
         <div className="min-h-[420px] space-y-3 overflow-auto p-5 font-mono text-xs">{lines.length === 0 && <p className="text-ink-foreground/55">Pod startup and command output will appear here.</p>}{lines.map((line, i) => <div key={i}><p><span className="text-primary">{pod?.name ?? "pod"}</span><span className="opacity-50"> $ </span>{line.command}</p>{line.stdout && <pre className="mt-1 whitespace-pre-wrap opacity-80">{line.stdout}</pre>}{line.stderr && <pre className="mt-1 whitespace-pre-wrap text-warning">{line.stderr}</pre>}{line.exitCode !== undefined && <p className="mt-1 text-[10px] opacity-45">exit {line.exitCode}</p>}</div>)}{busy && <p className="flex items-center gap-2 opacity-60"><LoaderCircle className="size-3.5 animate-spin" />Waiting for Kubernetes…</p>}</div>
         <form onSubmit={(e) => void run(e)} className="flex gap-2 border-t border-ink-foreground/10 p-3"><input value={input} onChange={(e) => setInput(e.target.value)} disabled={!shellId || busy} className="h-11 min-w-0 flex-1 rounded-xl bg-ink-foreground/5 px-4 font-mono text-xs outline-none focus:ring-1 focus:ring-primary" placeholder={shellId ? "Run a command in this pod" : "Start a pod to open its shell"} /><button disabled={!shellId || busy || !input.trim()} className="rounded-xl bg-primary px-4 text-primary-foreground disabled:opacity-50"><Send className="size-4" /></button></form>
       </Panel>
