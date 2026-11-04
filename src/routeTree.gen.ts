@@ -10,17 +10,25 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as BatchJobsRouteImport } from './routes/batch-jobs'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as ClusterRouteImport } from './routes/cluster'
 import { Route as MarketplaceRouteImport } from './routes/marketplace'
+import { Route as NetbirdRouteImport } from './routes/netbird'
 import { Route as TerminalRouteImport } from './routes/terminal'
 import { Route as ProviderIndexRouteImport } from './routes/provider.index'
+import { Route as ProviderChatRouteImport } from './routes/provider.chat'
 import { Route as ProviderRequestsRouteImport } from './routes/provider.requests'
 import { Route as ProvidersIdRouteImport } from './routes/providers.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BatchJobsRoute = BatchJobsRouteImport.update({
+  id: '/batch-jobs',
+  path: '/batch-jobs',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatRoute = ChatRouteImport.update({
@@ -38,6 +46,11 @@ const MarketplaceRoute = MarketplaceRouteImport.update({
   path: '/marketplace',
   getParentRoute: () => rootRouteImport,
 } as any)
+const NetbirdRoute = NetbirdRouteImport.update({
+  id: '/netbird',
+  path: '/netbird',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TerminalRoute = TerminalRouteImport.update({
   id: '/terminal',
   path: '/terminal',
@@ -46,6 +59,11 @@ const TerminalRoute = TerminalRouteImport.update({
 const ProviderIndexRoute = ProviderIndexRouteImport.update({
   id: '/provider/',
   path: '/provider/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProviderChatRoute = ProviderChatRouteImport.update({
+  id: '/provider/chat',
+  path: '/provider/chat',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProviderRequestsRoute = ProviderRequestsRouteImport.update({
@@ -61,20 +79,26 @@ const ProvidersIdRoute = ProvidersIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/batch-jobs': typeof BatchJobsRoute
   '/chat': typeof ChatRoute
   '/cluster': typeof ClusterRoute
   '/marketplace': typeof MarketplaceRoute
+  '/netbird': typeof NetbirdRoute
   '/terminal': typeof TerminalRoute
+  '/provider/chat': typeof ProviderChatRoute
   '/provider/requests': typeof ProviderRequestsRoute
   '/providers/$id': typeof ProvidersIdRoute
   '/provider/': typeof ProviderIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/batch-jobs': typeof BatchJobsRoute
   '/chat': typeof ChatRoute
   '/cluster': typeof ClusterRoute
   '/marketplace': typeof MarketplaceRoute
+  '/netbird': typeof NetbirdRoute
   '/terminal': typeof TerminalRoute
+  '/provider/chat': typeof ProviderChatRoute
   '/provider/requests': typeof ProviderRequestsRoute
   '/providers/$id': typeof ProvidersIdRoute
   '/provider': typeof ProviderIndexRoute
@@ -82,10 +106,13 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/batch-jobs': typeof BatchJobsRoute
   '/chat': typeof ChatRoute
   '/cluster': typeof ClusterRoute
   '/marketplace': typeof MarketplaceRoute
+  '/netbird': typeof NetbirdRoute
   '/terminal': typeof TerminalRoute
+  '/provider/chat': typeof ProviderChatRoute
   '/provider/requests': typeof ProviderRequestsRoute
   '/providers/$id': typeof ProvidersIdRoute
   '/provider/': typeof ProviderIndexRoute
@@ -94,30 +121,39 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/batch-jobs'
     | '/chat'
     | '/cluster'
     | '/marketplace'
+    | '/netbird'
     | '/terminal'
+    | '/provider/chat'
     | '/provider/requests'
     | '/providers/$id'
     | '/provider/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/batch-jobs'
     | '/chat'
     | '/cluster'
     | '/marketplace'
+    | '/netbird'
     | '/terminal'
+    | '/provider/chat'
     | '/provider/requests'
     | '/providers/$id'
     | '/provider'
   id:
     | '__root__'
     | '/'
+    | '/batch-jobs'
     | '/chat'
     | '/cluster'
     | '/marketplace'
+    | '/netbird'
     | '/terminal'
+    | '/provider/chat'
     | '/provider/requests'
     | '/providers/$id'
     | '/provider/'
@@ -125,10 +161,13 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  BatchJobsRoute: typeof BatchJobsRoute
   ChatRoute: typeof ChatRoute
   ClusterRoute: typeof ClusterRoute
   MarketplaceRoute: typeof MarketplaceRoute
+  NetbirdRoute: typeof NetbirdRoute
   TerminalRoute: typeof TerminalRoute
+  ProviderChatRoute: typeof ProviderChatRoute
   ProviderRequestsRoute: typeof ProviderRequestsRoute
   ProvidersIdRoute: typeof ProvidersIdRoute
   ProviderIndexRoute: typeof ProviderIndexRoute
@@ -141,6 +180,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/batch-jobs': {
+      id: '/batch-jobs'
+      path: '/batch-jobs'
+      fullPath: '/batch-jobs'
+      preLoaderRoute: typeof BatchJobsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/chat': {
@@ -164,6 +210,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MarketplaceRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/netbird': {
+      id: '/netbird'
+      path: '/netbird'
+      fullPath: '/netbird'
+      preLoaderRoute: typeof NetbirdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/terminal': {
       id: '/terminal'
       path: '/terminal'
@@ -176,6 +229,13 @@ declare module '@tanstack/react-router' {
       path: '/provider'
       fullPath: '/provider/'
       preLoaderRoute: typeof ProviderIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/provider/chat': {
+      id: '/provider/chat'
+      path: '/provider/chat'
+      fullPath: '/provider/chat'
+      preLoaderRoute: typeof ProviderChatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/provider/requests': {
@@ -197,10 +257,13 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  BatchJobsRoute: BatchJobsRoute,
   ChatRoute: ChatRoute,
   ClusterRoute: ClusterRoute,
   MarketplaceRoute: MarketplaceRoute,
+  NetbirdRoute: NetbirdRoute,
   TerminalRoute: TerminalRoute,
+  ProviderChatRoute: ProviderChatRoute,
   ProviderRequestsRoute: ProviderRequestsRoute,
   ProvidersIdRoute: ProvidersIdRoute,
   ProviderIndexRoute: ProviderIndexRoute,

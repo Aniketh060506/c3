@@ -1,106 +1,83 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { motion, AnimatePresence } from "motion/react";
-import { useEffect, useRef, useState } from "react";
-import { Plus, RotateCw, X } from "lucide-react";
-import { PageHeader } from "@/components/kit";
-import { cn } from "@/lib/utils";
-import { nodes, pods } from "@/lib/mock";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useState } from "react";
+import { ArrowLeft, Boxes, Cpu, LoaderCircle, MemoryStick, Play, Send, Terminal as TerminalIcon, Zap } from "lucide-react";
+import { PageHeader, Panel } from "@/components/kit";
+import { clusterService } from "@/lib/platform";
 
 export const Route = createFileRoute("/terminal")({
-  head: () => ({
-    meta: [
-      { title: "Terminal · ComputePool" },
-      { name: "description", content: "Open shells into your control plane, nodes and pods." },
-      { property: "og:title", content: "Terminal · ComputePool" },
-      { property: "og:description", content: "Multi-tab shells across your rented cluster." },
-    ],
-  }),
-  component: TerminalPage,
+  validateSearch: (search: Record<string, unknown>) => ({ clusterId: typeof search["clusterId"] === "string" ? search["clusterId"] : "" }),
+  head: () => ({ meta: [{ title: "Interactive pod · ComputePool" }] }),
+  component: InteractivePod,
 });
 
-type Line = { kind: "in" | "out" | "ok" | "err"; text: string };
-type Tab = { id: number; target: string; lines: Line[] };
+type Line = { command?: string; stdout?: string; stderr?: string; exitCode?: number };
 
-function respond(cmd: string): Line[] {
-  const c = cmd.trim();
-  if (c === "help") return [{ kind: "out", text: "try: kubectl get nodes · kubectl get pods -A · nvidia-smi · clear" }];
-  if (c === "kubectl get nodes") return [{ kind: "out", text: "NAME                STATUS     ROLES           AGE" }, ...nodes.map((n) => ({ kind: (n.status === "Ready" ? "ok" : "err") as Line["kind"], text: `${n.name.padEnd(20)}${n.status.padEnd(11)}${(n.role === "Worker" ? "<none>" : "control-plane").padEnd(16)}1h` }))];
-  if (c.startsWith("kubectl get pods")) return [{ kind: "out", text: "NAMESPACE  NAME                STATUS" }, ...pods.map((p) => ({ kind: (p.status === "Pending" ? "err" : "out") as Line["kind"], text: `${p.ns.padEnd(11)}${p.name.padEnd(20)}${p.status}` }))];
-  if (c === "nvidia-smi") return [{ kind: "ok", text: "NVIDIA RTX 4090 | 24564MiB | 78% util | 64°C | CUDA 12.4" }];
-  if (!c) return [];
-  return [{ kind: "err", text: `${c.split(" ")[0]}: command not found (simulated shell)` }];
-}
-
-function TerminalPage() {
-  const targets = ["control-plane", ...nodes.filter((n) => n.id !== "cp").map((n) => n.name), "pod/trainer-7f9c-0"];
-  const [tabs, setTabs] = useState<Tab[]>([{ id: 1, target: "control-plane", lines: [{ kind: "ok", text: "Connected to control-plane via NetBird 100.84.12.7" }, { kind: "out", text: "Type 'help' to get started." }] }]);
-  const [active, setActive] = useState(1);
+function InteractivePod() {
+  const { clusterId } = Route.useSearch();
+  const [image, setImage] = useState("");
+  const [namespace, setNamespace] = useState("default");
+  const [cpu, setCpu] = useState(2);
+  const [memory, setMemory] = useState(4);
+  const [gpu, setGpu] = useState(0);
+  const [pod, setPod] = useState<{ namespace: string; name: string; image: string } | null>(null);
+  const [shellId, setShellId] = useState<string | null>(null);
   const [input, setInput] = useState("");
-  const [hist, setHist] = useState<string[]>([]);
-  const [hIdx, setHIdx] = useState(-1);
-  const scroll = useRef<HTMLDivElement>(null);
-  const tab = tabs.find((t) => t.id === active) ?? tabs[0];
+  const [lines, setLines] = useState<Line[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => { scroll.current?.scrollTo({ top: 1e6, behavior: "smooth" }); }, [tab?.lines.length]);
-
-  const run = () => {
-    const cmd = input;
-    setHist((h) => [cmd, ...h]); setHIdx(-1); setInput("");
-    setTabs((ts) => ts.map((t) => (t.id !== active ? t : cmd.trim() === "clear" ? { ...t, lines: [] } : { ...t, lines: [...t.lines, { kind: "in", text: cmd }, ...respond(cmd)] })));
+  const start = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setError(null); setShellId(null); setLines([]);
+    try {
+      if (!clusterId) throw new Error("Open this tool from a connected ComputePool session.");
+      const created = await clusterService.createInteractivePod(clusterId, { image: image.trim(), cpuCores: cpu, memoryGib: memory, gpuCount: gpu, namespace: namespace.trim() });
+      const session = await clusterService.openPodShell(clusterId, created.namespace, created.podName);
+      setPod({ namespace: created.namespace, name: created.podName, image: created.image });
+      setShellId(session.shellId);
+      setLines([{ stdout: `Pod ${created.namespace}/${created.podName} is ready. Image: ${created.image}` }]);
+    } catch (e) { setError(e instanceof Error ? e.message : "Interactive pod was not started."); }
+    finally { setBusy(false); }
   };
 
-  const open = (target: string) => {
-    const id = Date.now();
-    setTabs((ts) => [...ts, { id, target, lines: [{ kind: "ok", text: `Connected to ${target}` }] }]);
-    setActive(id);
+  const run = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!shellId || !input.trim()) return;
+    const command = input.trim(); setInput(""); setBusy(true); setError(null);
+    try { const result = await clusterService.executePodCommand(shellId, command); setLines((all) => [...all, { command, ...result }]); }
+    catch (e) { setError(e instanceof Error ? e.message : "Command was not executed."); }
+    finally { setBusy(false); }
   };
 
-  if (!tab) return null;
-
-  return (
-    <div className="mx-auto max-w-6xl">
-      <PageHeader eyebrow="Consumer · Shell" title="Terminal" />
-      <div className="mb-4 flex flex-wrap gap-2">
-        {targets.map((t, i) => (
-          <motion.button key={t} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.04 }} whileHover={{ y: -2 }} onClick={() => open(t)}
-            className="flex items-center gap-1.5 rounded-full border border-border bg-card px-3.5 py-2 font-mono text-xs font-semibold shadow-soft hover:border-primary">
-            <Plus className="size-3" />{t}
-          </motion.button>
-        ))}
-      </div>
-      <div className="overflow-hidden rounded-[2rem] bg-ink text-ink-foreground shadow-lift">
-        <div className="flex items-center gap-1 overflow-x-auto border-b border-ink-foreground/10 px-3 pt-3">
-          {tabs.map((t) => (
-            <button key={t.id} onClick={() => setActive(t.id)} className={cn("relative flex items-center gap-2 rounded-t-xl px-4 py-2 font-mono text-xs", active === t.id ? "text-ink-foreground" : "text-ink-foreground/50")}>
-              {active === t.id && <motion.span layoutId="term-tab" className="absolute inset-0 rounded-t-xl bg-ink-foreground/10" />}
-              <span className="relative size-1.5 rounded-full bg-success" />
-              <span className="relative">{t.target}</span>
-              {tabs.length > 1 && <X className="relative size-3 opacity-60 hover:opacity-100" onClick={(e) => { e.stopPropagation(); setTabs((ts) => ts.filter((x) => x.id !== t.id)); if (active === t.id) setActive(tabs[0]!.id === t.id ? tabs[1]!.id : tabs[0]!.id); }} />}
-            </button>
-          ))}
-          <button className="ml-auto mb-2 flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-ink-foreground/60 hover:text-ink-foreground" onClick={() => setTabs((ts) => ts.map((t) => (t.id === active ? { ...t, lines: [...t.lines, { kind: "ok", text: "Reconnected." }] } : t)))}><RotateCw className="size-3" />Reconnect</button>
-        </div>
-        <div ref={scroll} onClick={() => document.getElementById("term-in")?.focus()} className="h-[460px] overflow-y-auto p-5 font-mono text-[13px] leading-relaxed">
-          <AnimatePresence initial={false}>
-            {tab.lines.map((l, i) => (
-              <motion.div key={i} initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.15, delay: l.kind === "in" ? 0 : 0.02 * (i % 10) }}
-                className={cn("whitespace-pre", l.kind === "ok" && "text-success", l.kind === "err" && "text-warning", l.kind === "in" && "text-ink-foreground")}>
-                {l.kind === "in" ? <><span className="text-accent">{tab.target}</span><span className="opacity-50"> $ </span>{l.text}</> : <span className={l.kind === "out" ? "opacity-70" : ""}>{l.text}</span>}
-              </motion.div>
-            ))}
-          </AnimatePresence>
-          <div className="flex items-center">
-            <span className="text-accent">{tab.target}</span><span className="opacity-50">&nbsp;$&nbsp;</span>
-            <input id="term-in" autoFocus value={input} onChange={(e) => setInput(e.target.value)} spellCheck={false}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") run();
-                if (e.key === "ArrowUp" && hist.length) { const n = Math.min(hist.length - 1, hIdx + 1); setHIdx(n); setInput(hist[n] ?? ""); }
-                if (e.key === "ArrowDown") { const n = Math.max(-1, hIdx - 1); setHIdx(n); setInput(n < 0 ? "" : (hist[n] ?? "")); }
-              }}
-              className="flex-1 bg-transparent caret-accent outline-none" aria-label="Terminal input" />
+  return <div className="mx-auto max-w-7xl">
+    <Link to="/cluster" search={{ clusterId }} className="mb-4 inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground"><ArrowLeft className="size-4" />Session dashboard</Link>
+    <PageHeader eyebrow="Interactive compute · Kubernetes pod" title="Pod shell"><Link to="/batch-jobs" search={{ clusterId }} className="inline-flex items-center rounded-xl border border-border px-3 py-2 text-xs font-semibold"><Boxes className="mr-2 size-4" />Distributed workload</Link></PageHeader>
+    {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}
+    <div className="grid gap-4 xl:grid-cols-[0.72fr_1.28fr]">
+      <Panel>
+        <h2 className="text-lg font-bold">Start an interactive pod</h2>
+        <p className="mb-5 mt-1 text-sm text-muted-foreground">Choose the image and per pod resource requests. Kubernetes schedules it on a node with matching free capacity.</p>
+        <form onSubmit={(e) => void start(e)} className="space-y-4">
+          <Field label="Container image"><input required value={image} onChange={(e) => setImage(e.target.value)} className="field" placeholder="pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime" /></Field>
+          <Field label="Kubernetes namespace"><input required value={namespace} onChange={(e) => setNamespace(e.target.value)} className="field" placeholder="default" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="CPU cores"><input type="number" min={1} max={256} value={cpu} onChange={(e) => setCpu(Math.max(1, Number(e.target.value)))} className="field" /></Field>
+            <Field label="Memory (GiB)"><input type="number" min={1} max={4096} value={memory} onChange={(e) => setMemory(Math.max(1, Number(e.target.value)))} className="field" /></Field>
           </div>
-        </div>
-      </div>
+          <Field label="NVIDIA GPUs"><input type="number" min={0} max={32} value={gpu} onChange={(e) => setGpu(Math.max(0, Number(e.target.value)))} className="field" /></Field>
+          <div className="rounded-xl bg-muted p-3 text-xs leading-5 text-muted-foreground"><Cpu className="mr-2 inline size-3.5" />{cpu} CPU · <MemoryStick className="mx-1 inline size-3.5" />{memory} GiB · <Zap className="mx-1 inline size-3.5" />{gpu} GPU. These become Kubernetes requests and limits; GPU nodes need the NVIDIA device plugin installed.</div>
+          <button disabled={busy || !image.trim()} className="inline-flex h-11 w-full items-center justify-center rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground disabled:opacity-50">{busy ? <LoaderCircle className="mr-2 size-4 animate-spin" /> : <Play className="mr-2 size-4" />}Start pod and open shell</button>
+        </form>
+        {pod && <div className="mt-4 rounded-xl border border-success/30 bg-success-soft p-3 text-xs"><p className="font-semibold">Running pod</p><p className="mt-1 font-mono">{pod.namespace}/{pod.name}</p><p className="mt-1 break-all text-muted-foreground">{pod.image}</p></div>}
+        <p className="mt-4 text-xs leading-5 text-muted-foreground">Uses the active kubectl context. Input and output folder mounting is configured with the distributed workload’s data transfer settings.</p>
+      </Panel>
+      <Panel className="overflow-hidden bg-ink p-0 text-ink-foreground">
+        <div className="flex items-center gap-2 border-b border-ink-foreground/10 px-4 py-3"><TerminalIcon className="size-4 text-primary" /><span className="font-mono text-xs">{pod ? `${pod.namespace}/${pod.name}` : "Pod terminal"}</span><span className="ml-auto rounded-full bg-ink-foreground/10 px-2 py-1 text-[10px]">{shellId ? "Connected" : busy ? "Starting pod" : "No pod"}</span></div>
+        <div className="min-h-[420px] space-y-3 overflow-auto p-5 font-mono text-xs">{lines.length === 0 && <p className="text-ink-foreground/55">Pod startup and command output will appear here.</p>}{lines.map((line, i) => <div key={i}><p><span className="text-primary">{pod?.name ?? "pod"}</span><span className="opacity-50"> $ </span>{line.command}</p>{line.stdout && <pre className="mt-1 whitespace-pre-wrap opacity-80">{line.stdout}</pre>}{line.stderr && <pre className="mt-1 whitespace-pre-wrap text-warning">{line.stderr}</pre>}{line.exitCode !== undefined && <p className="mt-1 text-[10px] opacity-45">exit {line.exitCode}</p>}</div>)}{busy && <p className="flex items-center gap-2 opacity-60"><LoaderCircle className="size-3.5 animate-spin" />Waiting for Kubernetes…</p>}</div>
+        <form onSubmit={(e) => void run(e)} className="flex gap-2 border-t border-ink-foreground/10 p-3"><input value={input} onChange={(e) => setInput(e.target.value)} disabled={!shellId || busy} className="h-11 min-w-0 flex-1 rounded-xl bg-ink-foreground/5 px-4 font-mono text-xs outline-none focus:ring-1 focus:ring-primary" placeholder={shellId ? "Run a command in this pod" : "Start a pod to open its shell"} /><button disabled={!shellId || busy || !input.trim()} className="rounded-xl bg-primary px-4 text-primary-foreground disabled:opacity-50"><Send className="size-4" /></button></form>
+      </Panel>
     </div>
-  );
+  </div>;
 }
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="block text-xs font-semibold">{label}{children}</label>; }

@@ -11,5 +11,8 @@ export default defineConfig({
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
     server: { entry: "server" },
+    // Tauri ships static web assets in the desktop bundle; native commands run in Rust.
+    spa: { enabled: true, prerender: { outputPath: "/index.html" } },
   },
+  vite: { server: { watch: { ignored: ["**/src-tauri/**"] } } },
 });

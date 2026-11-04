@@ -1,109 +1,51 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { motion, AnimatePresence } from "motion/react";
-import { useState } from "react";
-import { Bar, BarChart, ResponsiveContainer, XAxis, Tooltip } from "recharts";
-import { Power } from "lucide-react";
-import { Counter, PageHeader, Panel, Pill, Ring, Spark } from "@/components/kit";
-import { Slider } from "@/components/ui/slider";
-import { useLiveSeries } from "@/hooks/use-live";
-import { earnings, myHardware } from "@/lib/mock";
-import { cn } from "@/lib/utils";
+import { useEffect, useState } from "react";
+import { Cpu, MemoryStick, Power, RefreshCw, Zap } from "lucide-react";
+import { PageHeader, Panel } from "@/components/kit";
+import { Button } from "@/components/ui/button";
+import { dependencyService, hardwareService, providerService, type Dependency, type HardwareSnapshot, type ProviderSessionMetric, type ProviderStatus } from "@/lib/platform";
 
-export const Route = createFileRoute("/provider/")({
-  head: () => ({
-    meta: [
-      { title: "Provider dashboard · ComputePool" },
-      { name: "description", content: "Control what you share, watch usage and track your earnings." },
-      { property: "og:title", content: "Provider dashboard · ComputePool" },
-      { property: "og:description", content: "Share spare hardware and earn credits." },
-    ],
-  }),
-  component: ProviderDash,
-});
-
-function ProviderDash() {
-  const [sharing, setSharing] = useState(false);
-  const [cpu, setCpu] = useState(6);
-  const [ram, setRam] = useState(12);
-  const [gpuPct, setGpuPct] = useState(70);
-  const usage = useLiveSeries(sharing ? 46 : 8, 12);
-  const h = myHardware;
-  const total = earnings.reduce((a, e) => a + e.v, 0);
-  const potential = (cpu * 0.08 + ram * 0.02 + (gpuPct / 100) * 0.9).toFixed(2);
-
-  return (
-    <div className="mx-auto max-w-7xl">
-      <PageHeader eyebrow="Provider" title="Share your machine" />
-
-      {/* Big sharing switch */}
-      <motion.div layout className={cn("mb-5 flex flex-wrap items-center gap-6 rounded-[2rem] border p-6 shadow-soft transition-colors", sharing ? "border-success bg-success-soft" : "border-border bg-card")}>
-        <button onClick={() => setSharing((s) => !s)} aria-label="Toggle sharing"
-          className={cn("relative h-16 w-32 rounded-full p-1.5 transition-colors", sharing ? "bg-success" : "bg-muted")}>
-          <motion.span layout transition={{ type: "spring", stiffness: 500, damping: 30 }}
-            className={cn("grid size-13 place-items-center rounded-full bg-card shadow-lift", sharing ? "ml-auto" : "")}>
-            <Power className={cn("size-5", sharing ? "text-success" : "text-muted-foreground")} />
-          </motion.span>
-        </button>
-        <div className="flex-1">
-          <AnimatePresence mode="wait">
-            <motion.div key={String(sharing)} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-              <h2 className="text-2xl font-bold">{sharing ? "You're live on the pool" : "Sharing is paused"}</h2>
-              <p className="text-sm text-muted-foreground">{sharing ? `Offering ${cpu} cores, ${ram} GB RAM and ${gpuPct}% of your GPU.` : "Set your limits, then flip the switch."}</p>
-            </motion.div>
-          </AnimatePresence>
-        </div>
-        <div className="text-right"><p className="text-xs text-muted-foreground">Potential</p><p className="font-display text-3xl font-bold">{potential}<span className="text-sm text-muted-foreground"> cr/hr</span></p></div>
-      </motion.div>
-
-      <div className="grid gap-5 lg:grid-cols-3">
-        <Panel className="lg:col-span-1">
-          <h2 className="mb-1 text-lg font-bold">Resource limits</h2>
-          <p className="mb-5 text-sm text-muted-foreground">Your PC keeps the rest.</p>
-          <Limit label="CPU cores" v={cpu} max={h.cpu.logical} set={setCpu} unit={`/ ${h.cpu.logical}`} />
-          <Limit label="RAM" v={ram} max={h.ram.total} set={setRam} unit={`/ ${h.ram.total} GB`} />
-          <Limit label="GPU share" v={gpuPct} max={100} set={setGpuPct} unit="%" />
-          {/* Split bar visual */}
-          <div className="mt-5 flex h-3 overflow-hidden rounded-full bg-muted">
-            <motion.div className="bg-primary" animate={{ width: `${(cpu / h.cpu.logical) * 100}%` }} />
-          </div>
-          <p className="mt-1.5 text-xs text-muted-foreground">Blue is shared, grey stays with you.</p>
-        </Panel>
-
-        <Panel delay={0.05}>
-          <h2 className="mb-4 text-lg font-bold">Live usage</h2>
-          <div className="flex items-center justify-around">
-            <Ring value={usage[usage.length - 1]!.v} size={110} stroke={11}><div><p className="text-xs text-muted-foreground">CPU</p><p className="font-display text-xl font-bold">{Math.round(usage[usage.length - 1]!.v)}%</p></div></Ring>
-            <Ring value={sharing ? 61 : 4} size={110} stroke={11} tone="accent"><div><p className="text-xs text-muted-foreground">GPU</p><p className="font-display text-xl font-bold">{sharing ? 61 : 4}%</p></div></Ring>
-          </div>
-          <div className="mt-4"><Spark data={usage} /></div>
-          <div className="mt-3 flex justify-between text-sm"><span className="text-muted-foreground">Active sessions</span><Pill tone={sharing ? "success" : "muted"} pulse={sharing}>{sharing ? "1 · nora.ml" : "None"}</Pill></div>
-        </Panel>
-
-        <Panel delay={0.1}>
-          <div className="flex items-end justify-between">
-            <div><h2 className="text-lg font-bold">Earnings</h2><p className="text-sm text-muted-foreground">This week</p></div>
-            <p className="font-display text-3xl font-bold"><Counter value={total} decimals={2} /><span className="text-sm text-muted-foreground"> cr</span></p>
-          </div>
-          <div className="mt-4 h-44">
-            <ResponsiveContainer>
-              <BarChart data={earnings}>
-                <XAxis dataKey="d" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} />
-                <Tooltip cursor={{ fill: "var(--muted)", radius: 12 }} contentStyle={{ borderRadius: 14, border: "1px solid var(--border)" }} />
-                <Bar dataKey="v" radius={[10, 10, 10, 10]} fill="var(--accent)" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </Panel>
-      </div>
-    </div>
-  );
+export const Route = createFileRoute("/provider/")({ head: () => ({ meta: [{ title: "Provider · ComputePool" }] }), component: ProviderDashboard });
+function ProviderDashboard() {
+  const [hardware, setHardware] = useState<HardwareSnapshot | null>(null);
+  const [status, setStatus] = useState<ProviderStatus | null>(null);
+  const [sessions, setSessions] = useState<ProviderSessionMetric[] | null>(null);
+  const [deps, setDeps] = useState<Dependency[] | null>(null);
+  const [cpu, setCpu] = useState(0);
+  const [ram, setRam] = useState(0);
+  const [gpus, setGpus] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const refresh = async () => {
+    const labels = ["Local hardware", "Provider status", "Dependency check", "AWS negotiations and sessions"];
+    const results = await Promise.allSettled([hardwareService.get(), providerService.status(), dependencyService.list(), providerService.sessions()]);
+    const hw = results[0];
+    if (hw.status === "fulfilled") {
+      const data = hw.value;
+      setHardware(data);
+      setCpu((n) => n || data.cpu.logicalCores);
+      setRam((n) => n || Math.floor(data.memory.availableBytes / 1024 ** 3));
+    }
+    if (results[1].status === "fulfilled") setStatus(results[1].value);
+    if (results[2].status === "fulfilled") setDeps(results[2].value);
+    if (results[3].status === "fulfilled") setSessions(results[3].value);
+    const failedIndex = results.findIndex((result) => result.status === "rejected");
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") {
+      const detail = failed.reason instanceof Error ? failed.reason.message : "Provider service unavailable.";
+      setError(`${labels[failedIndex]} failed: ${detail}${failedIndex === 3 && detail.startsWith("500:") ? " Check the computepool-marketplace Lambda log group in CloudWatch for the matching 'Marketplace request failed' entry; it contains the AWS cause." : ""}`);
+    } else setError(null);
+  };
+  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 20000); return () => window.clearInterval(timer); }, []);
+  const toggle = async () => { setBusy(true); setError(null); try { if (!status?.online) { if (!hardware) throw new Error("Live hardware inventory is required before sharing."); if (!deps) throw new Error("Machine readiness could not be checked."); const missingDocker = deps.find((d) => d.id === "docker" && d.status !== "installed"); if (missingDocker) throw new Error(`Start Docker Desktop before sharing. Check: ${missingDocker.name}.`); if (gpus.length && deps.some((d) => ["nvidia", "nvct"].includes(d.id) && d.status !== "installed")) throw new Error("NVIDIA drivers and NVIDIA Container Toolkit must be installed before offering GPU capacity."); await providerService.setLimits({ cpuCores: cpu, memoryBytes: ram * 1024 ** 3, gpuIds: gpus }); const updated = await providerService.setOnline(true); setStatus(updated); } else setStatus(await providerService.setOnline(false)); } catch (e) { setError(e instanceof Error ? e.message : "Provider status did not change."); } finally { setBusy(false); } };
+  const memoryGb = hardware ? Math.floor(hardware.memory.availableBytes / 1024 ** 3) : 0;
+  return <div className="mx-auto max-w-7xl"><PageHeader eyebrow="Provider · local machine" title="Share this laptop"><Button variant="outline" className="rounded-xl" onClick={() => void refresh()}><RefreshCw className="mr-2 size-4" />Refresh live status</Button></PageHeader>{error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}<Panel className={`mb-5 ${status?.online ? "border-success/40 bg-success-soft/50" : ""}`}><div className="flex flex-wrap items-center gap-4"><div className={`grid size-14 place-items-center rounded-2xl ${status?.online ? "bg-success text-white" : "bg-muted text-muted-foreground"}`}><Power className="size-6" /></div><div className="min-w-52 flex-1"><h2 className="text-xl font-bold">{status?.online ? "This laptop is online" : "This laptop is offline"}</h2><p className="text-sm text-muted-foreground">{status ? `${status.activeSessions} active sessions · updated ${new Date(status.capturedAt).toLocaleTimeString()}` : "Provider presence has not been confirmed by the service."}</p></div><Button onClick={() => void toggle()} disabled={busy || !hardware} className="rounded-xl">{busy ? "Updating…" : status?.online ? "Stop sharing" : "Save limits & go online"}</Button></div></Panel>
+    {!hardware ? <Panel className="text-sm text-muted-foreground">Live hardware inventory is needed to set safe contribution limits. Open the Windows app with the native hardware service connected.</Panel> : <div className="grid gap-4 lg:grid-cols-[1fr_1fr]"><Panel><h2 className="text-lg font-bold">Your contribution limits</h2><p className="mb-5 mt-1 text-sm text-muted-foreground">Only these limits are advertised. Remaining capacity stays reserved for your own work.</p><div className="mb-5 rounded-xl bg-muted p-3 text-sm"><p className="font-semibold">{(hardware.memory.totalBytes / 1024 ** 3).toFixed(1)} GB installed</p><p className="mt-1 text-muted-foreground">{(hardware.memory.usedBytes / 1024 ** 3).toFixed(1)} GB in use · {(hardware.memory.availableBytes / 1024 ** 3).toFixed(1)} GB free now. The share limit is capped by currently free RAM to protect this laptop.</p></div><Limit icon={Cpu} label="CPU cores" value={cpu} max={hardware.cpu.logicalCores} unit="cores" onChange={setCpu} /><Limit icon={MemoryStick} label="RAM to share (free now)" value={ram} max={memoryGb} unit="GB" onChange={setRam} /><div className="mt-5"><p className="flex items-center gap-2 text-sm font-semibold"><Zap className="size-4" />GPU devices</p>{hardware.gpus.length ? <div className="mt-2 space-y-2">{hardware.gpus.map((gpu) => <label key={gpu.id} className={`flex items-center gap-3 rounded-xl border border-border p-3 text-sm ${gpu.computeSupported ? "" : "opacity-75"}`}><input type="checkbox" disabled={!gpu.computeSupported} checked={gpus.includes(gpu.id)} onChange={(e) => setGpus((all) => e.target.checked ? [...all, gpu.id] : all.filter((id) => id !== gpu.id))} /><span className="flex-1"><span className="block">{gpu.name}</span><span className="text-xs text-muted-foreground">{gpu.computeSupported ? "NVIDIA GPU scheduling supported" : "Detected; GPU scheduling is not enabled for this adapter"}</span></span><span className="text-right text-xs text-muted-foreground">{gpu.vramTotalBytes > 0 ? `${(gpu.vramTotalBytes / 1024 ** 3).toFixed(1)} GB VRAM` : "Shared memory"}<br />{gpu.driverVersion ? `Driver ${gpu.driverVersion}` : "Driver reported by Windows"}</span></label>)}</div> : <p className="mt-2 text-sm text-muted-foreground">No GPU detected. Windows display adapters are checked locally.</p>}</div><Button variant="outline" className="mt-5 w-full rounded-xl" onClick={async () => { setBusy(true); try { await providerService.setLimits({ cpuCores: cpu, memoryBytes: ram * 1024 ** 3, gpuIds: gpus }); } catch (e) { setError(e instanceof Error ? e.message : "Limits were not saved."); } finally { setBusy(false); } }} disabled={busy}>Save contribution limits</Button></Panel>
+      <Panel><h2 className="text-lg font-bold">Live resource usage</h2><p className="mb-4 mt-1 text-sm text-muted-foreground">Updates when the local monitoring service reports fresh telemetry.</p><div className="space-y-3"><Usage label="CPU" used={hardware.cpu.utilizationPercent} reserved={cpu / Math.max(1, hardware.cpu.logicalCores) * 100} /><Usage label="Memory" used={hardware.memory.usedBytes / Math.max(1, hardware.memory.totalBytes) * 100} reserved={ram / Math.max(1, hardware.memory.totalBytes / 1024 ** 3) * 100} />{hardware.gpus.map((gpu) => gpu.telemetryAvailable ? <Usage key={gpu.id} label={gpu.name} used={gpu.utilizationPercent} reserved={gpus.includes(gpu.id) ? 100 : 0} /> : <p key={gpu.id} className="text-xs text-muted-foreground">{gpu.name}: utilization telemetry is unavailable.</p>)}</div><div className="mt-5 rounded-xl bg-muted p-3 text-xs text-muted-foreground">Usage is a live point-in-time reading. Session consumption and durations are listed from provider records below.</div></Panel></div>}
+    {hardware && <Panel className="mt-4"><div className="flex items-center justify-between"><div><h2 className="text-lg font-bold">Active consumer sessions</h2><p className="mt-1 text-sm text-muted-foreground">Live resource consumption and elapsed time per accepted session.</p></div><span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold">{sessions?.length ?? "—"} reported</span></div>{sessions === null ? <p className="mt-4 text-sm text-muted-foreground">Session metrics are unavailable from the provider service.</p> : sessions.length === 0 ? <p className="mt-4 text-sm text-muted-foreground">No sessions currently use this laptop.</p> : <div className="mt-4 grid gap-3 md:grid-cols-2">{sessions.map((s) => <div key={s.id} className="rounded-2xl border border-border p-4"><div className="flex justify-between gap-3"><div><p className="font-semibold">{s.consumer}</p><p className="mt-1 text-xs text-muted-foreground">Started {new Date(s.startedAt).toLocaleString()}</p></div><span className="h-fit rounded-full bg-muted px-2.5 py-1 text-xs capitalize">{s.state}</span></div><div className="mt-4 grid grid-cols-3 gap-2 text-center"><Stat label="CPU" value={s.cpuPercent === undefined ? "—" : `${s.cpuPercent}%`} /><Stat label="RAM" value={s.memoryBytes === undefined ? "—" : `${(s.memoryBytes / 1024 ** 3).toFixed(1)} GB`} /><Stat label="GPU" value={s.gpuPercent === undefined ? "—" : `${s.gpuPercent}%`} /></div><p className="mt-3 text-xs text-muted-foreground">Elapsed {elapsed(s.startedAt)}</p></div>)}</div>}</Panel>}
+  </div>;
 }
-
-function Limit({ label, v, max, set, unit }: { label: string; v: number; max: number; set: (n: number) => void; unit: string }) {
-  return (
-    <div className="mb-5">
-      <div className="mb-2 flex justify-between text-sm"><span className="font-semibold">{label}</span><span className="font-mono font-bold">{v} <span className="text-muted-foreground">{unit}</span></span></div>
-      <Slider value={[v]} min={0} max={max} step={1} onValueChange={([x]) => set(x ?? 0)} />
-    </div>
-  );
-}
+function Limit({ icon: Icon, label, value, max, unit, onChange }: { icon: typeof Cpu; label: string; value: number; max: number; unit: string; onChange: (n: number) => void }) { return <label className="mb-5 block"><span className="flex items-center gap-2 text-sm font-semibold"><Icon className="size-4 text-primary" />{label}</span><span className="mt-2 flex items-center gap-3"><input type="range" min={0} max={max} value={Math.min(value, max)} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-primary" /><span className="min-w-20 text-right font-mono text-sm">{Math.min(value, max)} / {max} {unit}</span></span></label>; }
+function Usage({ label, used, reserved }: { label: string; used: number; reserved: number }) { const pct = Number.isFinite(used) ? Math.max(0, Math.min(100, used)) : 0; return <div><div className="flex justify-between gap-3 text-xs"><span className="truncate font-semibold">{label}</span><span className="text-muted-foreground">{pct.toFixed(0)}% in use · {reserved.toFixed(0)}% offered</span></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} /></div></div>; }
+function Stat({ label, value }: { label: string; value: string }) { return <div className="rounded-xl bg-muted p-2"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-1 text-sm font-bold">{value}</p></div>; }
+function elapsed(start: string) { const d = Date.now() - new Date(start).getTime(); if (!Number.isFinite(d) || d < 0) return "—"; const minutes = Math.floor(d / 60000); return `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }

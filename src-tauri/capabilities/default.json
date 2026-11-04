@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core app commands and native folder selection for ComputePool.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

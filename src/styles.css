@@ -148,3 +148,9 @@
   }
   h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.02em; }
 }
+
+@layer components {
+  .field {
+    @apply mt-1 h-10 w-full rounded-xl border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-primary;
+  }
+}

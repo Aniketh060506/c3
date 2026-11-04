@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ComputePool Cognito-authenticated marketplace API using existing DynamoDB tables and Lambda environment configuration for NetBird.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: Cognito User Pool JWT -> API Gateway HTTP API -> Lambda -> existing DynamoDB tables; NetBird management token stays in Lambda environment configuration.
+    must:
+      - Never deploy or bundle AWS credentials or the NetBird management token in the desktop client.
+      - Existing DynamoDB tables are retained and are not replaced or modified by this stack.
+      - Provider presence expires logically from heartbeat timestamps; DynamoDB TTL is not relied on for timely expiry.
+Parameters:
+  UserPoolId:
+    Type: String
+    Default: ap-south-1_xAlBWSAWs
+  AppClientId:
+    Type: String
+    Default: 794gej34ru6dce5b7bqhfu165e
+  NetBirdManagementApi:
+    Type: String
+    Default: https://api.netbird.io
+  NetBirdEnrollmentGroupId:
+    Type: String
+    Default: ''
+    Description: Optional NetBird peer group ID assigned to newly enrolled ComputePool peers.
+Resources:
+  MarketplaceApi:
+    Type: AWS::Serverless::HttpApi
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Cognito JWT authorization for desktop marketplace and negotiation calls.
+        must:
+          - JWT issuer and audience match the ComputePool user pool and public app client.
+    Properties:
+      StageName: prod
+      Auth:
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}
+              audience: [!Ref AppClientId]
+        DefaultAuthorizer: CognitoJwt
+  MarketplaceFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Implements online provider discovery, negotiation chat/decisions, and secure NetBird enrollment-key issuance.
+        must:
+          - Use the verified Cognito sub as owner identity; never trust caller-supplied owner IDs.
+          - Enforce participant checks for every negotiation and message operation.
+        mutable: change-with-constraints
+    Properties:
+      Runtime: nodejs22.x
+      Handler: app.handler
+      CodeUri: ./src/
+      Timeout: 20
+      MemorySize: 256
+      Environment:
+        Variables:
+          PROVIDERS_TABLE: online_providers
+          SESSIONS_TABLE: sessions
+          CONVERSATIONS_TABLE: conversations
+          MESSAGES_TABLE: messages
+          NETBIRD_API: !Ref NetBirdManagementApi
+          NETBIRD_MANAGEMENT_TOKEN: ''
+          NETBIRD_ENROLLMENT_GROUP_ID: !Ref NetBirdEnrollmentGroupId
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:Scan, dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+              Resource:
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/online_providers
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/sessions
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/conversations
+                - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/messages
+      Events:
+        Providers:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: /providers
+            Method: GET
+        ProviderHeartbeat:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: /providers/me
+            Method: PUT
+        ProviderOffline:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: /providers/me
+            Method: DELETE
+        Negotiations:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: /negotiations
+            Method: ANY
+        NegotiationDecision:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: '/negotiations/{id}/decision'
+            Method: POST
+        NegotiationMessages:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: '/negotiations/{id}/messages'
+            Method: ANY
+        NetBirdSetupKey:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: /netbird/setup-key
+            Method: POST
+        NetBirdVerifyPeer:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: /netbird/verify-peer
+            Method: POST
+        SessionNetBird:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MarketplaceApi
+            Path: /sessions/netbird
+            Method: ANY
+        ExpiredSessionCleanup:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Input: '{"source":"computepool.cleanup"}'
+Outputs:
+  ApiUrl:
+    Description: Cognito-protected ComputePool HTTP API base URL.
+    Value: !Sub https://${MarketplaceApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod

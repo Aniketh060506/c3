@@ -1,121 +1,25 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { motion } from "motion/react";
-import { useState } from "react";
-import { Power, Terminal } from "lucide-react";
-import { toast } from "sonner";
-import { Counter, HueAvatar, PageHeader, Panel, Pill, Ring, Spark } from "@/components/kit";
-import { useLiveSeries, useTicker } from "@/hooks/use-live";
-import { nodes, pods } from "@/lib/mock";
-import { cn } from "@/lib/utils";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { Activity, Cpu, LoaderCircle, MemoryStick, RefreshCw, Send, Terminal, Wifi } from "lucide-react";
+import { PageHeader, Panel } from "@/components/kit";
+import { Button } from "@/components/ui/button";
+import { clusterService, type ClusterSnapshot } from "@/lib/platform";
 
-export const Route = createFileRoute("/cluster")({
-  head: () => ({
-    meta: [
-      { title: "Cluster · ComputePool" },
-      { name: "description", content: "Live view of your rented compute cluster, nodes and pods." },
-      { property: "og:title", content: "Cluster dashboard · ComputePool" },
-      { property: "og:description", content: "Nodes, pods and resource usage across providers." },
-    ],
-  }),
-  component: Cluster,
-});
-
+export const Route = createFileRoute("/cluster")({ validateSearch: (search: Record<string, unknown>) => ({ clusterId: typeof search["clusterId"] === "string" ? search["clusterId"] : "" }), head: () => ({ meta: [{ title: "Session dashboard · ComputePool" }] }), component: Cluster });
 function Cluster() {
-  const cpu = useLiveSeries(62, 10);
-  const gpu = useLiveSeries(78, 8);
-  const t = useTicker();
-  const [sel, setSel] = useState(nodes[1]!.id);
-  const node = nodes.find((n) => n.id === sel)!;
-  const mins = 72 + Math.floor(t / 60);
-  const totalCpu = nodes.reduce((a, n) => a + n.cpu, 0);
-  const totalRam = nodes.reduce((a, n) => a + n.ram, 0);
-
-  return (
-    <div className="mx-auto max-w-7xl">
-      <PageHeader eyebrow="Session · cp-cluster-7a1" title="Cluster dashboard">
-        <div className="flex items-center gap-2">
-          <Pill tone="success" pulse>Healthy</Pill>
-          <Pill>K3s v1.30.2</Pill>
-          <Pill tone="primary">{Math.floor(mins / 60)}h {String(mins % 60).padStart(2, "0")}m {String(t % 60).padStart(2, "0")}s</Pill>
-          <button onClick={() => toast("Session will end after workloads drain")} className="flex items-center gap-1.5 rounded-xl bg-destructive-soft px-3 py-2 text-xs font-bold text-destructive"><Power className="size-3.5" />End session</button>
-        </div>
-      </PageHeader>
-
-      <div className="mb-5 grid gap-4 md:grid-cols-4">
-        <Panel><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">CPU</p><p className="font-display text-3xl font-bold"><Counter value={totalCpu} /> <span className="text-sm text-muted-foreground">cores</span></p><Spark data={cpu} /></Panel>
-        <Panel delay={0.05}><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Memory</p><p className="font-display text-3xl font-bold"><Counter value={totalRam} /> <span className="text-sm text-muted-foreground">GB</span></p><Spark data={cpu.map((d) => ({ ...d, v: d.v * 0.7 }))} tone="accent" /></Panel>
-        <Panel delay={0.1}><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">GPU</p><p className="font-display text-3xl font-bold">3 <span className="text-sm text-muted-foreground">devices</span></p><Spark data={gpu} tone="success" /></Panel>
-        <Panel delay={0.15} className="flex items-center justify-between">
-          <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Pods</p><p className="font-display text-3xl font-bold">{pods.filter((p) => p.status === "Running").length}<span className="text-sm text-muted-foreground">/{pods.length}</span></p><p className="text-xs text-muted-foreground">2 jobs running</p></div>
-          <Ring value={gpu[gpu.length - 1]!.v} tone="success"><span className="text-xs font-bold">VRAM</span></Ring>
-        </Panel>
-      </div>
-
-      <div className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
-        <Panel delay={0.2}>
-          <h2 className="mb-1 text-lg font-bold">Topology</h2>
-          <p className="mb-4 text-sm text-muted-foreground">Tap a node. Dots are live packets over the private mesh.</p>
-          <Topology sel={sel} onSel={setSel} />
-        </Panel>
-        <Panel delay={0.25}>
-          <div className="flex items-center gap-3">
-            <HueAvatar hue={node.hue} label={node.name} />
-            <div className="flex-1"><p className="font-mono text-sm font-bold">{node.name}</p><p className="text-xs text-muted-foreground">{node.role} · {node.provider}</p></div>
-            <Pill tone={node.status === "Ready" ? "success" : "warning"}>{node.status}</Pill>
-          </div>
-          <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-            {[["CPU", `${node.cpu}c`], ["RAM", `${node.ram}G`], ["GPU", node.gpu ?? "—"]].map(([k, v]) => (
-              <div key={k} className="rounded-2xl bg-muted p-3"><p className="text-[10px] text-muted-foreground">{k}</p><p className="truncate text-sm font-bold">{v}</p></div>
-            ))}
-          </div>
-          <p className="mt-5 mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Pods on this node</p>
-          <div className="space-y-2">
-            {pods.filter((p) => p.node === node.name).map((p) => (
-              <div key={p.name} className="flex items-center gap-3 rounded-2xl border border-border p-3">
-                <span className={cn("size-2 rounded-full", p.status === "Running" ? "bg-success" : p.status === "Pending" ? "bg-warning" : "bg-muted-foreground")} />
-                <div className="flex-1"><p className="font-mono text-xs font-semibold">{p.name}</p><p className="text-[10px] text-muted-foreground">{p.ns} · {p.age}</p></div>
-                <span className="font-mono text-xs">{p.cpu}%</span>
-              </div>
-            ))}
-            {pods.filter((p) => p.node === node.name).length === 0 && <p className="text-sm text-muted-foreground">No workloads scheduled.</p>}
-          </div>
-          <Link to="/terminal" className="mt-4 flex items-center justify-center gap-2 rounded-2xl bg-ink py-3 text-sm font-bold text-ink-foreground"><Terminal className="size-4" />Open terminal</Link>
-        </Panel>
-      </div>
-    </div>
-  );
+  const { clusterId } = Route.useSearch();
+  const navigate = useNavigate();
+  const [snapshot, setSnapshot] = useState<ClusterSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [nodeShell, setNodeShell] = useState<{ shellId: string; peerName: string; lines: string[] } | null>(null);
+  const [shellCommand, setShellCommand] = useState("");
+  const [shellBusy, setShellBusy] = useState(false);
+  const load = async () => { setError(null); try { setSnapshot(await clusterService.snapshot(clusterId || undefined)); } catch (e) { setSnapshot(null); setError(e instanceof Error ? e.message : "Session state unavailable."); } };
+  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 5000); return () => window.clearInterval(timer); }, [clusterId]);
+  const end = async () => { if (!snapshot || !window.confirm("End this compute session? Running workloads may be interrupted.")) return; try { await clusterService.endSession(snapshot.id); setSnapshot(null); await navigate({ to: "/marketplace" }); } catch (e) { setError(e instanceof Error ? e.message : "Could not end session."); } };
+  const openNodeShell = async (nodeId: string) => { setShellBusy(true); setError(null); try { const shell = await clusterService.openShell(clusterId, nodeId); setNodeShell({ shellId: shell.shellId, peerName: shell.peerName, lines: [shell.stdout] }); } catch (e) { setError(e instanceof Error ? e.message : "Could not open provider machine shell."); } finally { setShellBusy(false); } };
+  const runNodeCommand = async (event: React.FormEvent) => { event.preventDefault(); if (!nodeShell || !shellCommand.trim()) return; const command = shellCommand.trim(); setShellCommand(""); setShellBusy(true); try { const result = await clusterService.executeShellCommand(nodeShell.shellId, command); setNodeShell((state) => state ? { ...state, lines: [...state.lines, `$ ${command}`, result.stdout, result.stderr].filter(Boolean) } : state); } catch (e) { setError(e instanceof Error ? e.message : "Node command failed."); } finally { setShellBusy(false); } };
+  return <div className="mx-auto max-w-7xl"><PageHeader eyebrow="Consumer · connected session" title="Session dashboard">{snapshot && <Link to="/batch-jobs" search={{ clusterId: snapshot.id }} className="inline-flex items-center rounded-xl bg-primary px-3 py-2 text-xs font-bold text-primary-foreground">Deploy batch job</Link>}<Button variant="outline" className="rounded-xl" onClick={() => void load()}><RefreshCw className="mr-2 size-4" />Refresh live status</Button></PageHeader>{error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}{!snapshot ? <Panel className="py-12 text-center"><div className="mx-auto grid size-12 place-items-center rounded-2xl bg-muted"><Activity className="size-5 text-muted-foreground" /></div><h2 className="mt-4 text-xl font-bold">No active session reported</h2><p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">Start a session from the negotiation screen after a provider accepts. Node metrics and shell access appear here only after the cluster service confirms a connection.</p><Link to="/chat" search={{ providerId: "" }} className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Return to negotiation</Link></Panel> : <><Panel className="mb-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-widest text-primary">Cluster {snapshot.id}</p><p className="mt-1 text-sm text-muted-foreground">Last updated {new Date(snapshot.capturedAt).toLocaleString()}</p></div><div className="flex items-center gap-3"><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${snapshot.status === "ready" ? "bg-success-soft text-success" : "bg-warning-soft text-warning"}`}>{snapshot.status}</span><Button variant="outline" className="rounded-xl text-destructive" onClick={() => void end()}>End session</Button></div></div></Panel><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{snapshot.nodes.map((node) => <Panel key={node.id}><div className="flex items-start justify-between"><div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{node.role}</p><h2 className="mt-1 break-all font-mono text-base font-bold">{node.name}</h2></div><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${node.status === "ready" ? "bg-success-soft text-success" : "bg-warning-soft text-warning"}`}>{node.status}</span></div><div className="mt-4 grid grid-cols-2 gap-2"><Metric icon={Cpu} label="CPU" value={node.cpuPercent === undefined ? "—" : `${node.cpuPercent}%`} detail={node.cpuCores === undefined ? "capacity unavailable" : `${node.cpuCores} cores`} /><Metric icon={MemoryStick} label="Memory" value={node.memoryPercent === undefined ? "—" : `${node.memoryPercent}%`} detail={node.memoryBytes === undefined ? "capacity unavailable" : `${(node.memoryBytes / 1024 ** 3).toFixed(1)} GB`} /></div><div className="mt-3 rounded-xl bg-muted p-3 text-sm"><p className="text-xs font-semibold text-muted-foreground">GPU</p><p className="mt-1">{node.gpuNames.length ? node.gpuNames.join(", ") : "No GPU reported"}{node.gpuPercent === undefined ? "" : ` · ${node.gpuPercent}%`}</p></div><div className="mt-3 grid gap-2"><Link to="/terminal" search={{ clusterId: snapshot.id }} className="flex items-center justify-center gap-2 rounded-xl bg-primary px-3 py-2.5 text-sm font-bold text-primary-foreground"><Terminal className="size-4" />Pod shell</Link><Button variant="outline" className="rounded-xl" onClick={() => void openNodeShell(node.id)} disabled={shellBusy}><Terminal className="mr-2 size-4" />Provider machine shell</Button></div></Panel>)}</div>{nodeShell && <Panel className="mt-5 overflow-hidden bg-ink p-0 text-ink-foreground"><div className="flex items-center gap-2 border-b border-ink-foreground/10 px-4 py-3"><Terminal className="size-4 text-primary" /><span className="font-mono text-xs">Node shell · {nodeShell.peerName}</span><button className="ml-auto text-xs opacity-70 hover:opacity-100" onClick={() => setNodeShell(null)}>Close</button></div><div className="min-h-48 max-h-96 space-y-2 overflow-auto p-4 font-mono text-xs">{nodeShell.lines.map((line, i) => <pre key={i} className="whitespace-pre-wrap">{line}</pre>)}{shellBusy && <p className="flex items-center gap-2 opacity-60"><LoaderCircle className="size-3.5 animate-spin" />Running on provider machine…</p>}</div><form onSubmit={(e) => void runNodeCommand(e)} className="flex gap-2 border-t border-ink-foreground/10 p-3"><input value={shellCommand} onChange={(e) => setShellCommand(e.target.value)} disabled={shellBusy} className="h-11 min-w-0 flex-1 rounded-xl bg-ink-foreground/5 px-4 font-mono text-xs outline-none focus:ring-1 focus:ring-primary" placeholder="Run an OS command on this provider machine" /><button disabled={shellBusy || !shellCommand.trim()} className="rounded-xl bg-primary px-4 text-primary-foreground disabled:opacity-50"><Send className="size-4" /></button></form></Panel>}<div className="mt-5 rounded-2xl border border-border bg-card p-4 text-sm text-muted-foreground"><Wifi className="mr-2 inline size-4" />Cluster metrics update from Kubernetes. Pod shell runs inside a workload container; provider machine shell runs on that provider over the authenticated ComputePool peer service.</div></>}</div>;
 }
+function Metric({ icon: Icon, label, value, detail }: { icon: typeof Cpu; label: string; value: string; detail: string }) { return <div className="rounded-xl border border-border p-3"><p className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Icon className="size-3.5" />{label}</p><p className="mt-1 text-lg font-bold">{value}</p><p className="text-[10px] text-muted-foreground">{detail}</p></div>; }
 
-const pos: Record<string, [number, number]> = { cp: [50, 50], alpha: [16, 20], beta: [84, 24], gamma: [52, 88] };
-
-function Topology({ sel, onSel }: { sel: string; onSel: (id: string) => void }) {
-  return (
-    <div className="dot-grid relative aspect-[16/10] w-full rounded-3xl bg-muted">
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 size-full">
-        {nodes.filter((n) => n.id !== "cp").map((n, i) => {
-          const [x, y] = pos[n.id]!;
-          const d = `M50 50 L${x} ${y}`;
-          return (
-            <g key={n.id}>
-              <motion.path d={d} className={n.status === "Ready" ? "stroke-primary" : "stroke-warning"} strokeWidth="0.5" strokeDasharray="1.5 1.5" fill="none" initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.8, delay: i * 0.15 }} vectorEffect="non-scaling-stroke" />
-              {n.status === "Ready" && (
-                <motion.circle r="1" className="fill-accent" animate={{ cx: [50, x, 50], cy: [50, y, 50] }} transition={{ duration: 2.4 + i * 0.5, repeat: Infinity, ease: "easeInOut" }} />
-              )}
-            </g>
-          );
-        })}
-      </svg>
-      {nodes.map((n) => {
-        const [x, y] = pos[n.id]!;
-        return (
-          <motion.button key={n.id} onClick={() => onSel(n.id)} whileHover={{ scale: 1.08 }} whileTap={{ scale: 0.95 }}
-            className={cn("absolute -translate-x-1/2 -translate-y-1/2 rounded-2xl border-2 bg-card px-3 py-2 text-left shadow-soft transition-colors", sel === n.id ? "border-primary shadow-lift" : "border-transparent")}
-            style={{ left: `${x}%`, top: `${y}%` }}>
-            <p className="font-mono text-[11px] font-bold">{n.name}</p>
-            <p className="text-[10px] text-muted-foreground">{n.role}{n.gpu ? ` · ${n.gpu}` : ""}</p>
-          </motion.button>
-        );
-      })}
-    </div>
-  );
-}

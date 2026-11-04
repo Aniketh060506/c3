@@ -1,5 +1,5 @@
 import { motion, useMotionValue, useSpring, useTransform, animate } from "motion/react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
 import { cn } from "@/lib/utils";
 
@@ -159,18 +159,3 @@ export function Pill({ tone = "muted", children, pulse }: { tone?: "muted" | "su
   );
 }
 
-/** Text that scrambles into place, like a decoding readout. */
-export function Scramble({ text, className }: { text: string; className?: string }) {
-  const [out, setOut] = useState(text);
-  useEffect(() => {
-    const chars = "0123456789abcdef";
-    let frame = 0;
-    const id = setInterval(() => {
-      frame++;
-      setOut(text.split("").map((ch, i) => (i < frame / 1.5 || ch === " " || ch === "." ? ch : chars[Math.floor(Math.random() * chars.length)])).join(""));
-      if (frame / 1.5 > text.length) clearInterval(id);
-    }, 30);
-    return () => clearInterval(id);
-  }, [text]);
-  return <span className={cn("font-mono", className)}>{out}</span>;
-}

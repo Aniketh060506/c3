@@ -1,136 +1,41 @@
-import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
-import { motion, AnimatePresence, LayoutGroup } from "motion/react";
-import {
-  Bell, Boxes, Cpu, LayoutGrid, MessageCircle, Network, Search, Store, Terminal, Inbox, Gauge, Settings,
-} from "lucide-react";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { AnimatePresence, LayoutGroup, motion } from "motion/react";
+import { Boxes, Gauge, LayoutGrid, MessageCircle, Network, Store, Inbox, Cpu } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { SignOutButton } from "@/components/auth-gate";
 
 const consumerNav = [
-  { to: "/marketplace", label: "Marketplace", icon: Store },
-  { to: "/chat", label: "Chat", icon: MessageCircle, badge: 3 },
-  { to: "/cluster", label: "Cluster", icon: Network },
-  { to: "/terminal", label: "Terminal", icon: Terminal },
+  { to: "/marketplace", label: "Find providers", icon: Store },
+  { to: "/chat", label: "Negotiation", icon: MessageCircle },
+  { to: "/cluster", label: "Session dashboard", icon: Network },
 ] as const;
-
 const providerNav = [
-  { to: "/provider", label: "Dashboard", icon: Gauge },
-  { to: "/provider/requests", label: "Requests", icon: Inbox, badge: 3 },
-  { to: "/chat", label: "Chat", icon: MessageCircle },
+  { to: "/provider", label: "Share this laptop", icon: Gauge },
+  { to: "/provider/requests", label: "Requests & chat", icon: Inbox },
+  { to: "/provider/chat", label: "Conversations", icon: MessageCircle },
 ] as const;
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, username, signOut }: { children: ReactNode; username: string; signOut: () => Promise<void> }) {
   const path = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
   const mode: "consumer" | "provider" = path.startsWith("/provider") ? "provider" : "consumer";
   const nav = mode === "consumer" ? consumerNav : providerNav;
 
-  return (
-    <div className="flex min-h-screen bg-background">
-      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r border-border bg-sidebar p-4 md:flex">
-        <Link to="/" className="mb-6 flex items-center gap-2.5 px-2">
-          <motion.div
-            className="grid size-9 place-items-center rounded-xl bg-ink text-ink-foreground"
-            whileHover={{ rotate: 90 }}
-            transition={{ type: "spring", stiffness: 300, damping: 14 }}
-          >
-            <Boxes className="size-5" />
-          </motion.div>
-          <div>
-            <p className="font-display text-lg font-bold leading-none">ComputePool</p>
-            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">v0.9.2 · preview</p>
-          </div>
-        </Link>
-
-        {/* Mode switch with a sliding thumb */}
-        <div className="relative mb-6 grid grid-cols-2 rounded-2xl bg-muted p-1 text-sm font-semibold">
-          {(["consumer", "provider"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => navigate({ to: m === "consumer" ? "/marketplace" : "/provider" })}
-              className={cn("relative z-10 rounded-xl py-2 capitalize transition-colors", mode === m ? "text-foreground" : "text-muted-foreground")}
-            >
-              {mode === m && (
-                <motion.span layoutId="mode-thumb" className="absolute inset-0 -z-10 rounded-xl bg-card shadow-soft" transition={{ type: "spring", stiffness: 400, damping: 32 }} />
-              )}
-              {m}
-            </button>
-          ))}
-        </div>
-
-        <LayoutGroup>
-          <nav className="flex flex-col gap-1">
-            <NavItem to="/" label="Overview" icon={LayoutGrid} active={path === "/"} />
-            <AnimatePresence mode="popLayout">
-              <motion.div
-                key={mode}
-                initial={{ opacity: 0, x: mode === "consumer" ? -16 : 16 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: mode === "consumer" ? 16 : -16 }}
-                transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                className="flex flex-col gap-1"
-              >
-                <p className="mt-4 mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">{mode}</p>
-                {nav.map((n) => (
-                  <NavItem key={n.to} to={n.to} label={n.label} icon={n.icon} badge={"badge" in n ? n.badge : undefined} active={path === n.to} />
-                ))}
-              </motion.div>
-            </AnimatePresence>
-          </nav>
-        </LayoutGroup>
-
-        <div className="mt-auto rounded-2xl bg-ink p-4 text-ink-foreground">
-          <p className="text-xs opacity-70">Network credits</p>
-          <p className="font-display text-2xl font-bold">248.60</p>
-          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-ink-foreground/15">
-            <motion.div className="h-full rounded-full bg-accent" initial={{ width: 0 }} animate={{ width: "62%" }} transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }} />
-          </div>
-        </div>
-      </aside>
-
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-border bg-background/80 px-6 py-3 backdrop-blur-xl">
-          <div className="flex flex-1 items-center gap-2 rounded-2xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground shadow-soft md:max-w-md">
-            <Search className="size-4" />
-            <span>Search providers, nodes, pods…</span>
-            <kbd className="ml-auto rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px]">Ctrl K</kbd>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            <button className="relative grid size-10 place-items-center rounded-2xl border border-border bg-card shadow-soft" aria-label="Notifications">
-              <Bell className="size-4" />
-              <span className="absolute right-2.5 top-2.5 size-2 rounded-full bg-accent" />
-            </button>
-            <button className="grid size-10 place-items-center rounded-2xl border border-border bg-card shadow-soft" aria-label="Settings">
-              <Settings className="size-4" />
-            </button>
-            <div className="grid size-10 place-items-center rounded-2xl bg-primary font-display text-sm font-bold text-primary-foreground">RS</div>
-          </div>
-        </header>
-        <AnimatePresence mode="wait">
-          <motion.main
-            key={path}
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-            className="flex-1 px-6 py-8 lg:px-10"
-          >
-            {children}
-          </motion.main>
-        </AnimatePresence>
-      </div>
+  return <div className="flex min-h-screen bg-background">
+    <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r border-border bg-sidebar p-4 md:flex">
+      <Link to="/" className="mb-7 flex items-center gap-2.5 px-2"><span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground"><Boxes className="size-5" /></span><span><span className="block font-display text-lg font-bold leading-none">ComputePool</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">Windows desktop</span></span></Link>
+      <div className="mb-6 rounded-2xl bg-muted p-1"><div className="relative grid grid-cols-2 text-sm font-semibold">{(["consumer", "provider"] as const).map((m) => <button key={m} onClick={() => navigate({ to: m === "consumer" ? "/marketplace" : "/provider" })} className={cn("relative z-10 rounded-xl py-2.5 capitalize transition-colors", mode === m ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>{mode === m && <motion.span layoutId="mode-thumb" className="absolute inset-0 -z-10 rounded-xl bg-card shadow-soft" transition={{ type: "spring", stiffness: 400, damping: 32 }} />}{m}</button>)}</div></div>
+      <nav className="flex flex-col gap-1"><NavItem to="/" label="Machine readiness" icon={LayoutGrid} active={path === "/"} /><NavItem to="/netbird" label="NetBird setup" icon={Network} active={path === "/netbird"} /><LayoutGroup><AnimatePresence mode="wait"><motion.div key={mode} initial={{ opacity: 0, x: mode === "consumer" ? -12 : 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: mode === "consumer" ? 12 : -12 }} transition={{ duration: 0.18 }} className="flex flex-col gap-1"><p className="mb-1 mt-5 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">{mode} path</p>{nav.map((item) => <NavItem key={item.to} to={item.to} label={item.label} icon={item.icon} active={path === item.to || (item.to === "/cluster" && path === "/terminal")} />)}</motion.div></AnimatePresence></LayoutGroup></nav>
+      <div className="mt-auto rounded-2xl border border-border bg-background p-4"><p className="flex items-center gap-2 text-xs font-semibold"><Cpu className="size-4 text-primary" />Local machine first</p><p className="mt-2 text-xs leading-relaxed text-muted-foreground">Hardware and dependency status are read from this laptop. Provider data appears only when connected to the live service.</p></div>
+    </aside>
+    <div className="flex min-w-0 flex-1 flex-col">
+      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/85 px-5 py-3 backdrop-blur-xl md:px-8"><Link to="/" className="flex items-center gap-2 font-semibold md:hidden"><Boxes className="size-5 text-primary" />ComputePool</Link><div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex"><span className="size-2 rounded-full bg-primary" />{mode === "consumer" ? "Consumer workflow" : "Provider workflow"}</div><div className="flex items-center gap-1 rounded-full border border-border bg-card p-1 text-xs font-semibold md:hidden">{(["consumer", "provider"] as const).map((m) => <button key={m} onClick={() => navigate({ to: m === "consumer" ? "/marketplace" : "/provider" })} className={cn("rounded-full px-3 py-1.5 capitalize", mode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>{m}</button>)}</div><SignOutButton username={username} onSignOut={signOut} /></header>
+      <AnimatePresence mode="wait"><motion.main key={path} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.2 }} className="flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-8">{children}</motion.main></AnimatePresence>
     </div>
-  );
+  </div>;
 }
 
-function NavItem({ to, label, icon: Icon, active, badge }: { to: string; label: string; icon: typeof Cpu; active: boolean; badge?: number | undefined }) {
-  return (
-    <Link to={to} className={cn("relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors", active ? "text-primary" : "text-muted-foreground hover:text-foreground")}>
-      {active && <motion.span layoutId="nav-pill" className="absolute inset-0 -z-0 rounded-xl bg-primary-soft" transition={{ type: "spring", stiffness: 420, damping: 34 }} />}
-      <Icon className="relative size-4" />
-      <span className="relative">{label}</span>
-      {badge ? <span className="relative ml-auto rounded-full bg-accent px-1.5 text-[10px] font-bold text-accent-foreground">{badge}</span> : null}
-    </Link>
-  );
+function NavItem({ to, label, icon: Icon, active }: { to: string; label: string; icon: typeof Cpu; active: boolean }) {
+  return <Link to={to} className={cn("relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors", active ? "text-primary" : "text-muted-foreground hover:text-foreground")}>{active && <motion.span layoutId="nav-pill" className="absolute inset-0 -z-0 rounded-xl bg-primary-soft" transition={{ type: "spring", stiffness: 420, damping: 34 }} />}<Icon className="relative size-4" /><span className="relative">{label}</span></Link>;
 }
-

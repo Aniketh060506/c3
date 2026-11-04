@@ -8,8 +8,15 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.aws-sam/
+backend/src/node_modules/
 dist
 dist-ssr
+target/
+target-phase1/
+src-tauri/target/
+src-tauri/target-phase1/
+backend/computepool-lambda.zip
 .output
 .vinxi
 .tanstack/**

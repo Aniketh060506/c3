@@ -1,132 +1,118 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { motion, AnimatePresence } from "motion/react";
-import { useEffect, useRef, useState } from "react";
-import { Check, Paperclip, Repeat, Send, X } from "lucide-react";
-import { toast } from "sonner";
-import { HueAvatar, PageHeader, Pill } from "@/components/kit";
-import { providers, threads as seed, type Msg } from "@/lib/mock";
-import { cn } from "@/lib/utils";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { listen } from "@tauri-apps/api/event";
+import { useEffect, useState } from "react";
+import { FolderOpen, LoaderCircle, RefreshCw, Send, ShieldCheck } from "lucide-react";
+import { PageHeader, Panel } from "@/components/kit";
+import { Button } from "@/components/ui/button";
+import { clusterService, fileService, marketplaceService, negotiationService, type Negotiation, type NegotiationMessage, type ProviderNode } from "@/lib/platform";
 
-export const Route = createFileRoute("/chat")({
-  head: () => ({
-    meta: [
-      { title: "Chat & negotiation · ComputePool" },
-      { name: "description", content: "Negotiate resources and pricing directly with providers." },
-      { property: "og:title", content: "Negotiate compute · ComputePool" },
-      { property: "og:description", content: "Chat with providers and accept resource proposals." },
-    ],
-  }),
-  component: Chat,
-});
-
-function Chat() {
-  const [threads, setThreads] = useState(seed);
-  const [active, setActive] = useState(seed[0]!.providerId);
+export const Route = createFileRoute("/chat")({ validateSearch: (search: Record<string, unknown>) => ({ providerId: typeof search["providerId"] === "string" ? search["providerId"] : "" }), head: () => ({ meta: [{ title: "Negotiation · ComputePool" }] }), component: NegotiationChat });
+function NegotiationChat() {
+  const { providerId } = Route.useSearch();
+  const navigate = useNavigate();
+  const [provider, setProvider] = useState<ProviderNode | null>(null);
+  const [messages, setMessages] = useState<NegotiationMessage[]>([]);
+  const [negotiations, setNegotiations] = useState<Negotiation[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [text, setText] = useState("");
-  const endRef = useRef<HTMLDivElement>(null);
-  const thread = threads.find((t) => t.providerId === active)!;
-  const p = providers.find((x) => x.id === active)!;
-
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [thread.messages.length, active]);
-
-  const push = (m: Omit<Msg, "id" | "time">) =>
-    setThreads((ts) => ts.map((t) => (t.providerId === active ? { ...t, unread: 0, messages: [...t.messages, { ...m, id: String(Date.now() + Math.random()), time: "now" }] } : t)));
-
-  const setProposal = (id: string, state: "accepted" | "rejected") =>
-    setThreads((ts) => ts.map((t) => (t.providerId === active ? { ...t, messages: t.messages.map((m) => (m.id === id && m.proposal ? { ...m, proposal: { ...m.proposal, state } } : m)) } : t)));
-
-  const send = () => {
-    if (!text.trim()) return;
-    push({ from: "me", text });
-    setText("");
-    setTimeout(() => push({ from: "them", text: "Sounds good — sending you an updated proposal." }), 1200);
+  const [cpu, setCpu] = useState(2);
+  const [memory, setMemory] = useState(4);
+  const [minutes, setMinutes] = useState(60);
+  const [folder, setFolder] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [connection, setConnection] = useState<{ status: "connecting" | "ready" | "failed"; stages: { id: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string }[]; error?: string | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const accepted = negotiations.some((n) => n.state === "accepted");
+  const load = async () => {
+    if (!providerId) return;
+    setError(null);
+    const results = await Promise.allSettled([marketplaceService.get(providerId), negotiationService.list()]);
+    if (results[0].status === "fulfilled") setProvider(results[0].value);
+    let selectedConversation: Negotiation | undefined;
+    if (results[1].status === "fulfilled") {
+      const matching = results[1].value.filter((n) => n.providerId === providerId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      setNegotiations(matching);
+      selectedConversation = matching[0];
+      setConversationId(selectedConversation?.id ?? null);
+      if (selectedConversation) {
+        try { setMessages(await negotiationService.messagesById(selectedConversation.id)); }
+        catch (e) { setError(e instanceof Error ? e.message : "Conversation messages could not be loaded."); }
+      } else setMessages([]);
+    }
+    const failed = results.find((r) => r.status === "rejected");
+    if (failed?.status === "rejected") setError(failed.reason instanceof Error ? failed.reason.message : "Negotiation service unavailable.");
   };
+  useEffect(() => { void load(); }, [providerId]);
+  useEffect(() => {
+    if (!conversationId) return;
+    let active = true;
+    let reading = false;
+    const poll = async () => {
+      if (reading) return;
+      reading = true;
+      try { const latest = await negotiationService.messagesById(conversationId); if (active) setMessages(latest); }
+      catch { /* Keep the last messages visible during brief network interruptions. */ }
+      finally { reading = false; }
+    };
+    const timer = window.setInterval(() => void poll(), 1500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [conversationId]);
+  useEffect(() => {
+    if (!conversationId) return;
+    let active = true;
+    const pollDecision = async () => {
+      try { const latest = await negotiationService.list(); if (active) setNegotiations(latest.filter((n) => n.providerId === providerId)); }
+      catch { /* Preserve the last known negotiation state when offline. */ }
+    };
+    const timer = window.setInterval(() => void pollDecision(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [conversationId, providerId]);
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen<{ sessionId: string; clusterId: string; status: "connecting" | "ready" | "failed"; stages: { id: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string }[]; error?: string | null }>("computepool-session-progress", ({ payload }) => {
+      if (!active) return;
+      setSessionId(payload.sessionId);
+      setConnection(payload);
+      if (payload.error) setError(payload.error);
+    }).then((dispose) => { if (active) unlisten = dispose; else dispose(); });
+    return () => { active = false; unlisten?.(); };
+  }, []);
+  const send = async () => { if (!text.trim() || !conversationId) return; setBusy(true); setError(null); try { const sent = await negotiationService.sendMessageById(conversationId, text.trim()); setMessages((current) => [...current.filter((m) => m.id !== sent.id), sent].sort((a, b) => a.createdAt.localeCompare(b.createdAt))); setText(""); } catch (e) { setError(e instanceof Error ? e.message : "Message was not sent."); } finally { setBusy(false); } };
+  const propose = async () => { if (!providerId) return; setBusy(true); setError(null); try { await negotiationService.sendProposal(providerId, { cpuCores: cpu, memoryBytes: memory * 1024 ** 3, gpuIds: [], }, minutes); await load(); } catch (e) { setError(e instanceof Error ? e.message : "Proposal could not be sent."); } finally { setBusy(false); } };
+  const chooseFolder = async () => { setBusy(true); setError(null); try { setFolder(await fileService.chooseProjectFolder()); } catch (e) { setError(e instanceof Error ? e.message : "Folder picker unavailable."); } finally { setBusy(false); } };
+  const startSession = async () => { if (connection?.status === "failed") { setSessionId(null); setConnection(null); } setBusy(true); setError(null); try { const acceptedIds = negotiations.filter((n) => n.state === "accepted").map((n) => n.id); const setup = await clusterService.startSession(acceptedIds, folder!); setSessionId(setup.sessionId); setConnection((current) => current ?? { status: "connecting", stages: [] }); } catch (e) { setError(e instanceof Error ? e.message : "Session did not start."); } finally { setBusy(false); } };
 
-  return (
-    <div className="mx-auto max-w-6xl">
-      <PageHeader eyebrow="Negotiation" title="Messages" />
-      <div className="grid h-[calc(100vh-15rem)] min-h-[520px] overflow-hidden rounded-[2rem] border border-border bg-card shadow-soft md:grid-cols-[280px_1fr]">
-        <aside className="hidden flex-col gap-1 border-r border-border p-3 md:flex">
-          {threads.map((t) => {
-            const pr = providers.find((x) => x.id === t.providerId)!;
-            const last = t.messages[t.messages.length - 1];
-            return (
-              <button key={t.providerId} onClick={() => { setActive(t.providerId); setThreads((ts) => ts.map((x) => (x.providerId === t.providerId ? { ...x, unread: 0 } : x))); }}
-                className="relative flex items-center gap-3 rounded-2xl p-3 text-left">
-                {active === t.providerId && <motion.span layoutId="thread" className="absolute inset-0 rounded-2xl bg-muted" />}
-                <div className="relative"><HueAvatar hue={pr.hue} label={pr.name} size={40} />{pr.online && <span className="absolute -bottom-0.5 -right-0.5 size-3 rounded-full border-2 border-card bg-success" />}</div>
-                <div className="relative min-w-0 flex-1">
-                  <p className="truncate text-sm font-bold">{pr.name}</p>
-                  <p className="truncate text-xs text-muted-foreground">{last.proposal ? "📦 Resource proposal" : last.text}</p>
-                </div>
-                {t.unread > 0 && <span className="relative grid size-5 place-items-center rounded-full bg-accent text-[10px] font-bold text-accent-foreground">{t.unread}</span>}
-              </button>
-            );
-          })}
-        </aside>
+  useEffect(() => {
+    if (!sessionId) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const value = await clusterService.connectionStatus(sessionId);
+        if (!active) return;
+        setConnection(value);
+        if (value.status === "ready") await navigate({ to: "/cluster", search: { clusterId: value.clusterId } });
+        if (value.status === "failed") setError(value.error ?? "The provider connection could not be established.");
+      } catch (e) { if (active) setError(e instanceof Error ? e.message : "Connection status unavailable."); }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [sessionId, navigate]);
 
-        <section className="flex min-h-0 flex-col">
-          <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-            <HueAvatar hue={p.hue} label={p.name} size={36} />
-            <div className="flex-1"><p className="text-sm font-bold">{p.name}</p><p className="text-xs text-muted-foreground">{p.cpu} · {p.gpu ?? "CPU only"}</p></div>
-            {p.online ? <Pill tone="success" pulse>Online</Pill> : <Pill>Offline</Pill>}
-          </div>
-
-          <div className="dot-grid flex-1 space-y-3 overflow-y-auto p-5">
-            <AnimatePresence initial={false}>
-              {thread.messages.map((m) => (
-                <motion.div key={m.id} layout initial={{ opacity: 0, y: 14, scale: 0.96 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ type: "spring", stiffness: 380, damping: 28 }}
-                  className={cn("flex", m.from === "me" ? "justify-end" : "justify-start")}>
-                  {m.proposal ? (
-                    <ProposalCard m={m} onAccept={() => { setProposal(m.id, "accepted"); toast.success("Proposal accepted — session is being prepared"); }}
-                      onReject={() => setProposal(m.id, "rejected")}
-                      onCounter={() => push({ from: "me", proposal: { ...m.proposal!, price: +(m.proposal!.price * 0.85).toFixed(2), state: "open" } })} />
-                  ) : (
-                    <div className={cn("max-w-[70%] rounded-3xl px-4 py-2.5 text-sm", m.from === "me" ? "rounded-br-lg bg-primary text-primary-foreground" : "rounded-bl-lg border border-border bg-card")}>
-                      {m.text}<span className="ml-2 text-[10px] opacity-60">{m.time}</span>
-                    </div>
-                  )}
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            <div ref={endRef} />
-          </div>
-
-          <div className="flex items-center gap-2 border-t border-border p-3">
-            <button className="grid size-11 place-items-center rounded-2xl bg-muted" aria-label="Attach" onClick={() => toast("File picker opens in the desktop app")}><Paperclip className="size-4" /></button>
-            <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder="Write a message…" className="h-11 flex-1 rounded-2xl bg-muted px-4 text-sm outline-none" />
-            <motion.button whileTap={{ scale: 0.9, rotate: -12 }} onClick={send} className="grid size-11 place-items-center rounded-2xl bg-primary text-primary-foreground" aria-label="Send"><Send className="size-4" /></motion.button>
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function ProposalCard({ m, onAccept, onReject, onCounter }: { m: Msg; onAccept: () => void; onReject: () => void; onCounter: () => void }) {
-  const pr = m.proposal!;
-  return (
-    <motion.div layout className={cn("w-80 overflow-hidden rounded-3xl border-2 bg-card shadow-lift", pr.state === "accepted" ? "border-success" : pr.state === "rejected" ? "border-destructive" : "border-primary")}>
-      <div className="flex items-center justify-between bg-primary-soft px-4 py-2.5">
-        <span className="text-xs font-bold uppercase tracking-wider text-primary">{m.from === "me" ? "Your counteroffer" : "Resource proposal"}</span>
-        {pr.state !== "open" && <Pill tone={pr.state === "accepted" ? "success" : "destructive"}>{pr.state}</Pill>}
-      </div>
-      <div className="grid grid-cols-4 gap-1 p-4 text-center">
-        {[["CPU", pr.cpu], ["RAM", `${pr.ram}G`], ["GPU", pr.gpu], ["Hours", pr.hours]].map(([k, v]) => (
-          <div key={k}><p className="font-display text-xl font-bold">{v}</p><p className="text-[10px] text-muted-foreground">{k}</p></div>
-        ))}
-      </div>
-      <div className="flex items-center justify-between border-t border-border px-4 py-3">
-        <span className="text-sm text-muted-foreground">Agreed price</span>
-        <span className="font-display text-xl font-bold">{pr.price.toFixed(2)} cr</span>
-      </div>
-      {pr.state === "open" && m.from === "them" && (
-        <div className="grid grid-cols-3 gap-1.5 p-3 pt-0">
-          <button onClick={onAccept} className="flex items-center justify-center gap-1 rounded-xl bg-success py-2 text-xs font-bold text-primary-foreground"><Check className="size-3.5" />Accept</button>
-          <button onClick={onCounter} className="flex items-center justify-center gap-1 rounded-xl bg-muted py-2 text-xs font-bold"><Repeat className="size-3.5" />Counter</button>
-          <button onClick={onReject} className="flex items-center justify-center gap-1 rounded-xl bg-destructive-soft py-2 text-xs font-bold text-destructive"><X className="size-3.5" />Reject</button>
+  return <div className="mx-auto max-w-5xl"><PageHeader eyebrow="Consumer · step 2" title="Chat & agree first"><Button variant="outline" className="rounded-xl" onClick={() => void load()} disabled={!providerId || busy}><RefreshCw className="mr-2 size-4" />Refresh conversation</Button></PageHeader>
+    {!providerId ? <Panel className="py-10 text-center"><h2 className="text-xl font-bold">Choose a provider to begin</h2><p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">Open a live provider from the marketplace. The terminal appears only after the provider accepts and a session is connected.</p><Link to="/marketplace" className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Find providers</Link></Panel> : <>
+      {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}
+      <Panel className="mb-4"><div className="flex items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-widest text-primary">Selected provider</p><h2 className="mt-1 text-xl font-bold">{provider?.displayName ?? "Loading live provider…"}</h2></div><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${provider?.online ? "bg-success-soft text-success" : "bg-muted text-muted-foreground"}`}>{provider ? provider.online ? "Online" : "Offline" : "Status unavailable"}</span></div></Panel>
+      <div className="grid gap-4 lg:grid-cols-[1.5fr_0.8fr]">
+        <Panel className="flex min-h-[480px] flex-col"><div className="flex-1 space-y-3 overflow-y-auto pb-4">{messages.length ? messages.map((m) => <div key={m.id} className={`flex ${m.sender === "consumer" ? "justify-end" : "justify-start"}`}><div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${m.sender === "consumer" ? "bg-primary text-primary-foreground" : "border border-border bg-background"}`}><p>{m.text}</p>{m.proposal && <div className="mt-3 border-t border-current/15 pt-3 text-xs">Proposal · {m.proposal.cpuCores} CPU · {(m.proposal.memoryBytes / 1024 ** 3).toFixed(1)} GB RAM · {m.proposal.durationMinutes} min · {m.proposal.priceAmount} {m.proposal.currency}<p className="mt-1 font-bold">{m.proposal.state}</p></div>}<time className="mt-2 block text-[10px] opacity-60">{new Date(m.createdAt).toLocaleString()}</time></div></div>) : <div className="grid h-full min-h-48 place-items-center text-center"><p className="max-w-sm text-sm text-muted-foreground">No messages have been returned for this conversation. Send a message to begin; provider replies arrive through the live negotiation service.</p></div>}</div>
+          <div className="flex gap-2 border-t border-border pt-3"><input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void send()} placeholder="Talk through the workload and terms…" className="h-11 min-w-0 flex-1 rounded-xl bg-muted px-4 text-sm outline-none" /><Button className="rounded-xl" onClick={() => void send()} disabled={!text.trim() || busy || !conversationId}><Send className="size-4" /></Button></div></Panel>
+        <div className="space-y-4"><Panel><h2 className="font-bold">Resource proposal</h2><p className="mt-1 text-xs text-muted-foreground">The provider must explicitly accept before a session can start.</p><label className="mt-4 block text-xs font-semibold">CPU cores<input type="number" min={1} value={cpu} onChange={(e) => setCpu(Math.max(1, Number(e.target.value)))} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3" /></label><label className="mt-3 block text-xs font-semibold">Memory (GB)<input type="number" min={1} value={memory} onChange={(e) => setMemory(Math.max(1, Number(e.target.value)))} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3" /></label><label className="mt-3 block text-xs font-semibold">Duration (minutes)<input type="number" min={1} value={minutes} onChange={(e) => setMinutes(Math.max(1, Number(e.target.value)))} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3" /></label><Button className="mt-4 w-full rounded-xl" onClick={() => void propose()} disabled={busy || !provider?.online}><Send className="mr-2 size-4" />Send proposal</Button></Panel>
+          <Panel><h2 className="font-bold">Project folder</h2><p className="mt-1 text-xs text-muted-foreground">Choose only after you and the provider agree. Approved nodes use this project folder; outputs and logs return to this consumer laptop.</p><Button variant="outline" className="mt-3 w-full rounded-xl" disabled={!accepted || busy || (!!sessionId && connection?.status !== "failed")} onClick={() => void chooseFolder()}><FolderOpen className="mr-2 size-4" />{folder ? "Change folder" : "Choose project folder"}</Button>{folder && <p className="mt-2 break-all text-xs text-muted-foreground">{folder}</p>}<Button className="mt-3 w-full rounded-xl" disabled={!accepted || !folder || busy || (!!sessionId && connection?.status !== "failed")} onClick={() => void startSession()}>{busy ? <LoaderCircle className="mr-2 size-4 animate-spin" /> : <ShieldCheck className="mr-2 size-4" />}{connection?.status === "failed" ? "Retry session" : "Start session"}</Button>{!accepted && <p className="mt-2 text-xs text-muted-foreground">Waiting for provider acceptance. No connection will be started yet.</p>}</Panel>
         </div>
-      )}
-    </motion.div>
-  );
+      </div>
+      {sessionId && <Panel className="mt-4"><div className="flex items-center gap-3"><LoaderCircle className={`size-5 text-primary ${connection?.status === "failed" ? "hidden" : "animate-spin"}`} /><div><h2 className="font-bold">{connection?.status === "failed" ? "Connection failed" : connection?.status === "ready" ? "Cluster connected" : "Establishing live provider connection"}</h2><p className="text-xs text-muted-foreground">Session {sessionId} · {connection?.status === "ready" ? "all nodes are ready" : connection?.status === "failed" ? "review the failed stage, fix it, then retry" : "the dashboard opens when all cluster nodes are Ready."}</p></div></div>{connection?.stages.length ? <div className="mt-5 grid gap-2 sm:grid-cols-2">{connection.stages.map((stage) => <div key={stage.id} className="flex items-start gap-3 rounded-xl border border-border p-3"><span className={`mt-1 size-2 rounded-full ${stage.status === "completed" ? "bg-success" : stage.status === "running" ? "bg-primary animate-pulse" : stage.status === "failed" ? "bg-destructive" : "bg-muted-foreground"}`} /><div><p className="text-sm font-semibold">{stage.label}</p><p className="mt-1 text-xs capitalize text-muted-foreground">{stage.status}{stage.detail ? ` · ${stage.detail}` : ""}</p></div></div>)}</div> : <p className="mt-4 text-sm text-muted-foreground">Waiting for live connection stages from the session service…</p>}</Panel>}
+    </>}
+  </div>;
 }

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Core app commands and native folder selection for ComputePool.","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}
