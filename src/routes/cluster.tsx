@@ -15,7 +15,7 @@ function Cluster() {
   const [nodeShell, setNodeShell] = useState<{ shellId: string; peerName: string; lines: string[] } | null>(null);
   const [shellCommand, setShellCommand] = useState("");
   const [shellBusy, setShellBusy] = useState(false);
-  const load = async () => { setError(null); try { setSnapshot(await clusterService.snapshot(clusterId || undefined)); } catch (e) { setSnapshot(null); setError(e instanceof Error ? e.message : "Session state unavailable."); } };
+  const load = async () => { setError(null); try { const value = await clusterService.snapshot(clusterId || undefined); if (value.status === "disconnected" && value.nodes.length === 0) { setSnapshot(null); return; } setSnapshot(value); } catch (e) { setSnapshot(null); setError(e instanceof Error ? e.message : "Session state unavailable."); } };
   useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 5000); return () => window.clearInterval(timer); }, [clusterId]);
   const end = async () => { if (!snapshot || !window.confirm("End this compute session? Running workloads may be interrupted.")) return; try { await clusterService.endSession(snapshot.id); setSnapshot(null); await navigate({ to: "/marketplace" }); } catch (e) { setError(e instanceof Error ? e.message : "Could not end session."); } };
   const openNodeShell = async (nodeId: string) => { setShellBusy(true); setError(null); try { const shell = await clusterService.openShell(clusterId, nodeId); setNodeShell({ shellId: shell.shellId, peerName: shell.peerName, lines: [shell.stdout] }); } catch (e) { setError(e instanceof Error ? e.message : "Could not open provider machine shell."); } finally { setShellBusy(false); } };

@@ -681,10 +681,20 @@ async fn create_interactive_pod(cluster_id: String, image: String, cpu_cores: u3
     }
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let pod_name = format!("cp-shell-{stamp}");
-    let mut resources = format!("cpu={cpu_cores},memory={memory_gib}Gi");
-    if gpu_count > 0 { resources.push_str(&format!(",nvidia.com/gpu={gpu_count}")); }
-    let mut args = vec!["run", &pod_name, "--namespace", &namespace, "--image", image.trim(), "--restart=Never", "--requests", &resources, "--limits", &resources];
-    args.extend(["--command", "--", "sh", "-lc", "sleep infinity"]);
+    let mut resource_values = serde_json::Map::new();
+    resource_values.insert("cpu".into(), json!(cpu_cores.to_string()));
+    resource_values.insert("memory".into(), json!(format!("{memory_gib}Gi")));
+    if gpu_count > 0 { resource_values.insert("nvidia.com/gpu".into(), json!(gpu_count.to_string())); }
+    let overrides = json!({
+        "apiVersion": "v1",
+        "spec": { "containers": [{
+            "name": pod_name,
+            "image": image.trim(),
+            "command": ["sh", "-lc", "sleep infinity"],
+            "resources": { "requests": resource_values.clone(), "limits": resource_values }
+        }] }
+    }).to_string();
+    let args = vec!["run", &pod_name, "--namespace", &namespace, "--image", image.trim(), "--restart=Never", "--overrides", &overrides];
     let output = cluster_output(&cluster_id, &args).ok_or_else(|| "kubectl is not installed or not on PATH.".to_string())?;
     if !output.status.success() { return Err(format!("Could not create the interactive pod: {}", output_text(&output))); }
     let full_name = format!("pod/{pod_name}");
@@ -1147,8 +1157,16 @@ async fn set_provider_online(online: bool) -> Result<Value, String> {
         let node_id = provider_node_id(sub);
         if profile.is_null() { profile = json!({"online": false}); }
         if let Some(obj) = profile.as_object_mut() { obj.insert("online".into(), json!(false)); }
+        // Stop serving locally even when the marketplace API is unavailable.
+        // The listing will age out after its heartbeat window if deletion fails.
         peer::set_online(false, "", profile).await?;
-        let _ = computepool_api("DELETE", "/providers/me", Some(json!({"nodeId": node_id}))).await?;
+        let warning = computepool_api("DELETE", "/providers/me", Some(json!({"nodeId": node_id}))).await.err();
+        return Ok(json!({
+            "online": false,
+            "activeSessions": 0,
+            "capturedAt": peer::now_iso(),
+            "warning": warning.map(|error| format!("Sharing stopped on this laptop, but the service could not confirm the marketplace update: {error}. The listing should expire within 45 seconds."))
+        }));
     }
     get_provider_status().await
 }
@@ -1469,8 +1487,20 @@ fn node_metric_map(cluster_id: &str) -> HashMap<String, Value> {
 #[tauri::command(rename_all = "camelCase")]
 async fn get_cluster_snapshot(cluster_id: Option<String>) -> Result<Value, String> {
     let cluster_id = cluster_id.unwrap_or_else(|| SHARED_CLUSTER_ID.to_string());
+    if cluster_id == SHARED_CLUSTER_ID
+        && ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock()
+            .map_err(|_| "Session state is unavailable.")?.is_none()
+    {
+        return Ok(json!({"id": cluster_id, "status": "disconnected", "capturedAt": peer::now_iso(), "nodes": []}));
+    }
     let output = cluster_output(&cluster_id, &["get", "nodes", "-o", "json"]).ok_or("Docker or kubectl is not installed.")?;
-    if !output.status.success() { return Err(format!("K3s cluster is unavailable: {}", output_text(&output))); }
+    if !output.status.success() {
+        let message = output_text(&output);
+        if message.contains("No such container: cp-k3s-server") {
+            return Err("The consumer K3s control-plane container is no longer running. End the stale session and start a new session from Negotiation.".into());
+        }
+        return Err(format!("K3s cluster is unavailable: {message}"));
+    }
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|e| format!("K3s returned invalid node data: {e}"))?;
     let metrics = node_metric_map(&cluster_id);
     let nodes = value.get("items").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().filter_map(|node| {

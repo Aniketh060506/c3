@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1320" viewBox="0 0 1800 1320" role="img" aria-labelledby="title desc">
+  <title id="title">ComputePool detailed system architecture</title>
+  <desc id="desc">Visual architecture diagram showing the desktop app, AWS control plane, NetBird private network, consumer K3s server, provider K3s workers, and an eight step session flow.</desc>
+  <defs>
+    <linearGradient id="bg" x2="0" y2="1"><stop stop-color="#f7faff"/><stop offset="1" stop-color="#eef3f9"/></linearGradient>
+    <linearGradient id="hero" x2="1" y2="1"><stop stop-color="#132b4b"/><stop offset="1" stop-color="#1b4266"/></linearGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%"><feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#19324d" flood-opacity=".10"/></filter>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#3878c5"/></marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#139b9b"/></marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#de8a2c"/></marker>
+    <style>
+      text{font-family:Inter,'Segoe UI',Arial,sans-serif;fill:#16283d} .muted{fill:#5f7186} .white{fill:#fff} .small{font-size:14px} .tiny{font-size:12px}
+      .panel{fill:#fff;stroke:#d9e3ee;stroke-width:1.4;filter:url(#shadow)} .node{fill:#fff;stroke:#dbe5ef;stroke-width:1.2}
+      .label{font-size:13px;font-weight:700;letter-spacing:1.2px;fill:#6f8298} .title{font-size:34px;font-weight:750;letter-spacing:-.5px}
+      .nodehead{font-size:17px;font-weight:700} .body{font-size:13px;fill:#5f7186} .flow{fill:none;stroke:#3878c5;stroke-width:2.2;marker-end:url(#arrowBlue)}
+      .private{fill:none;stroke:#139b9b;stroke-width:3;marker-end:url(#arrowTeal)} .control{fill:none;stroke:#de8a2c;stroke-width:2.2;stroke-dasharray:7 6;marker-end:url(#arrowOrange)}
+    </style>
+  </defs>
+  <rect width="1800" height="1320" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1800" height="116" fill="url(#hero)"/>
+  <text x="54" y="49" class="white" font-size="13" font-weight="700" letter-spacing="2">COMPUTEPOOL · SYSTEM BLUEPRINT</text>
+  <text x="54" y="88" class="white" font-size="31" font-weight="750">From provider agreement to a private compute cluster</text>
+  <text x="1743" y="52" class="white" text-anchor="end" font-size="13" opacity=".8">CONTROL PLANE  +  COMPUTE / DATA PLANE</text>
+  <text x="1743" y="81" class="white" text-anchor="end" font-size="12" opacity=".72">Desktop-first · Windows · live services require Tauri</text>
+
+  <!-- AWS control plane -->
+  <rect x="38" y="140" width="1724" height="282" rx="20" class="panel"/>
+  <text x="64" y="176" class="label">01  /  AWS CONTROL PLANE · TRUST, DISCOVERY, AGREEMENT, ACCESS LEASE</text>
+  <rect x="67" y="202" width="232" height="103" rx="13" fill="#fff8eb" stroke="#f0d19d"/>
+  <circle cx="100" cy="236" r="20" fill="#e9a640"/><text x="100" y="242" text-anchor="middle" class="white" font-size="15" font-weight="800">ID</text>
+  <text x="131" y="232" class="nodehead">Amazon Cognito</text><text x="131" y="253" class="body">Hosted UI · OAuth PKCE</text><text x="84" y="284" class="tiny muted">ID token kept in desktop process memory</text>
+
+  <rect x="359" y="202" width="228" height="103" rx="13" fill="#fff8eb" stroke="#f0d19d"/>
+  <circle cx="392" cy="236" r="20" fill="#e9a640"/><text x="392" y="242" text-anchor="middle" class="white" font-size="14" font-weight="800">API</text>
+  <text x="423" y="232" class="nodehead">API Gateway</text><text x="423" y="253" class="body">HTTP API · JWT authorizer</text><text x="377" y="284" class="tiny muted">Checks issuer + audience before Lambda</text>
+
+  <rect x="657" y="202" width="301" height="103" rx="13" fill="#fff8eb" stroke="#f0d19d"/>
+  <circle cx="692" cy="236" r="20" fill="#e78328"/><text x="692" y="242" text-anchor="middle" class="white" font-size="16" font-weight="800">λ</text>
+  <text x="725" y="232" class="nodehead">AWS Lambda · Node.js 22</text><text x="725" y="253" class="body">backend/src/app.mjs</text><text x="675" y="284" class="tiny muted">Validates participant + accepted request state</text>
+
+  <rect x="1025" y="202" width="294" height="103" rx="13" fill="#f4f2ff" stroke="#d9d2fa"/>
+  <circle cx="1060" cy="236" r="20" fill="#7566c9"/><text x="1060" y="242" text-anchor="middle" class="white" font-size="13" font-weight="800">DB</text>
+  <text x="1093" y="232" class="nodehead">DynamoDB</text><text x="1093" y="253" class="body">providers · sessions · conversations</text><text x="1044" y="284" class="tiny muted">messages · heartbeat timestamps · policy lease</text>
+
+  <rect x="1390" y="202" width="328" height="103" rx="13" fill="#eaf9f7" stroke="#b8e6df"/>
+  <circle cx="1427" cy="236" r="20" fill="#149b91"/><text x="1427" y="242" text-anchor="middle" class="white" font-size="13" font-weight="800">NB</text>
+  <text x="1460" y="232" class="nodehead">NetBird Management API</text><text x="1460" y="253" class="body">setup keys · peers · groups · policies</text><text x="1408" y="284" class="tiny muted">Management token stays in Lambda environment</text>
+
+  <path d="M299 252H349" class="flow"/><text x="324" y="239" class="tiny muted" text-anchor="middle">login</text>
+  <path d="M587 252H647" class="control"/><text x="617" y="239" class="tiny muted" text-anchor="middle">HTTPS + JWT</text>
+  <path d="M958 252H1015" class="control"/><text x="987" y="239" class="tiny muted" text-anchor="middle">read/write</text>
+  <path d="M1319 252H1380" class="control"/><text x="1349" y="239" class="tiny muted" text-anchor="middle">lease policy</text>
+
+  <rect x="67" y="333" width="272" height="58" rx="11" fill="#f3f7fb" stroke="#d9e3ee"/>
+  <circle cx="96" cy="362" r="16" fill="#7c8da0"/><text x="96" y="367" text-anchor="middle" class="white" font-size="12" font-weight="800">⏱</text>
+  <text x="122" y="358" class="nodehead" font-size="14">EventBridge Scheduler</text><text x="122" y="377" class="tiny muted">every minute → expired-session cleanup</text>
+  <path d="M339 362H805V315" fill="none" stroke="#91a1b3" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#arrowBlue)"/>
+  <text x="397" y="353" class="tiny muted">expire session → delete NetBird policy/group → mark ended</text>
+  <rect x="1025" y="333" width="294" height="58" rx="11" fill="#f3f7fb" stroke="#d9e3ee"/>
+  <circle cx="1058" cy="362" r="16" fill="#7c8da0"/><text x="1058" y="367" text-anchor="middle" class="white" font-size="10" font-weight="800">LOG</text>
+  <text x="1086" y="358" class="nodehead" font-size="14">CloudWatch Logs</text><text x="1086" y="377" class="tiny muted">Lambda runtime and API diagnostics</text>
+  <rect x="1390" y="333" width="328" height="58" rx="11" fill="#f3f7fb" stroke="#d9e3ee"/>
+  <text x="1408" y="357" class="nodehead" font-size="14">Desktop API clients</text><text x="1408" y="377" class="tiny muted">Consumer + provider · HTTPS with Cognito ID token</text>
+
+  <!-- lower plane cards -->
+  <text x="52" y="466" class="label">02  /  COMPUTE + DATA PLANE · PRIVATE PEER TRAFFIC NEVER ROUTES THROUGH LAMBDA</text>
+  <rect x="38" y="488" width="460" height="477" rx="20" class="panel"/>
+  <text x="64" y="524" class="label" fill="#3878c5">CONSUMER WINDOWS LAPTOP</text>
+  <rect x="64" y="547" width="408" height="74" rx="12" fill="#eef5ff" stroke="#cfe0f7"/>
+  <circle cx="96" cy="584" r="20" fill="#3b82d0"/><text x="96" y="590" text-anchor="middle" class="white" font-size="14" font-weight="800">UI</text>
+  <text x="129" y="580" class="nodehead">React 19 · TanStack Router</text><text x="129" y="601" class="body">marketplace · chat · cluster · batch jobs · terminal</text>
+  <path d="M268 622V641" class="flow"/>
+  <rect x="64" y="646" width="408" height="84" rx="12" class="node"/>
+  <circle cx="96" cy="688" r="20" fill="#586f88"/><text x="96" y="694" text-anchor="middle" class="white" font-size="13" font-weight="800">IPC</text>
+  <text x="129" y="680" class="nodehead">Typed bridge → Tauri / Rust</text><text x="129" y="702" class="body">platform.ts · invoke commands · native folder picker</text><text x="129" y="719" class="tiny muted">no live-machine fallback in browser mode</text>
+  <path d="M268 731V750" class="flow"/>
+  <rect x="64" y="755" width="408" height="85" rx="12" class="node"/>
+  <circle cx="96" cy="797" r="20" fill="#e58b37"/><text x="96" y="803" text-anchor="middle" class="white" font-size="14" font-weight="800">R</text>
+  <text x="129" y="789" class="nodehead">Rust session orchestrator</text><text x="129" y="811" class="body">hardware · firewall · Docker · kubectl · AWS API client</text><text x="129" y="829" class="tiny muted">progress stages emitted to UI via Tauri events</text>
+  <rect x="64" y="862" width="194" height="76" rx="11" fill="#f5f8fb" stroke="#dbe5ef"/>
+  <circle cx="91" cy="889" r="16" fill="#596b7c"/><text x="91" y="894" text-anchor="middle" class="white" font-size="10" font-weight="800">OS</text>
+  <text x="116" y="887" class="nodehead" font-size="14">Windows services</text><text x="78" y="916" class="tiny muted">CPU / RAM / GPU · NetBird CLI</text>
+  <rect x="278" y="862" width="194" height="76" rx="11" fill="#eef8f1" stroke="#cbe7d1"/>
+  <circle cx="305" cy="889" r="16" fill="#249b5a"/><text x="305" y="894" text-anchor="middle" class="white" font-size="10" font-weight="800">🐳</text>
+  <text x="330" y="887" class="nodehead" font-size="14">Docker Desktop</text><text x="292" y="916" class="tiny muted">K3s server + cp-k3s-state</text>
+
+  <!-- Private overlay -->
+  <rect x="592" y="540" width="280" height="343" rx="20" fill="#e9f9f7" stroke="#9bded5" stroke-width="1.5"/>
+  <circle cx="732" cy="591" r="31" fill="#159b91"/><text x="732" y="598" text-anchor="middle" class="white" font-size="18" font-weight="800">NB</text>
+  <text x="732" y="647" class="nodehead" text-anchor="middle" font-size="19">NetBird overlay</text>
+  <text x="732" y="673" class="body" text-anchor="middle">private peer-to-peer network</text>
+  <line x1="625" y1="696" x2="839" y2="696" stroke="#b8e6df"/>
+  <text x="732" y="724" class="small" text-anchor="middle" font-weight="650">Temporary session allow-list</text>
+  <text x="732" y="749" class="tiny muted" text-anchor="middle">consumer + only accepted providers</text>
+  <text x="732" y="774" class="tiny muted" text-anchor="middle">all other peers remain outside</text>
+  <rect x="625" y="803" width="214" height="49" rx="10" fill="#fff" stroke="#c5e8e3"/>
+  <text x="732" y="824" class="tiny" text-anchor="middle" font-weight="700">Private ports</text><text x="732" y="841" class="tiny muted" text-anchor="middle">47631 · 6443 · 10250 · UDP 8472</text>
+  <text x="732" y="873" class="tiny muted" text-anchor="middle">Grant removed on end or expiry</text>
+
+  <!-- Provider -->
+  <rect x="965" y="488" width="797" height="477" rx="20" class="panel"/>
+  <text x="991" y="524" class="label" fill="#249b5a">PROVIDER LAPTOP(S) · ONE WORKER PER ACCEPTED PROVIDER</text>
+  <rect x="993" y="547" width="741" height="73" rx="12" fill="#eef8f1" stroke="#cbe7d1"/>
+  <circle cx="1026" cy="583" r="20" fill="#249b5a"/><text x="1026" y="589" text-anchor="middle" class="white" font-size="12" font-weight="800">CP</text>
+  <text x="1060" y="578" class="nodehead">ComputePool provider UI + Rust runtime</text><text x="1060" y="600" class="body">detect capacity · publish limits · heartbeat · review request · accept / reject</text>
+  <path d="M1362 621V638" class="flow"/>
+  <rect x="993" y="643" width="741" height="80" rx="12" class="node"/>
+  <circle cx="1026" cy="683" r="20" fill="#149b91"/><text x="1026" y="689" text-anchor="middle" class="white" font-size="11" font-weight="800">HTTP</text>
+  <text x="1060" y="675" class="nodehead">Axum private peer service · TCP 47631</text><text x="1060" y="697" class="body">join / leave · node shell · input archive · output archive</text><text x="1060" y="714" class="tiny muted">Cognito JWT + NetBird source-IP + accepted session checks</text>
+  <path d="M1362 724V741" class="flow"/>
+  <rect x="993" y="746" width="741" height="78" rx="12" fill="#eef8f1" stroke="#cbe7d1"/>
+  <circle cx="1026" cy="785" r="20" fill="#249b5a"/><text x="1026" y="791" text-anchor="middle" class="white" font-size="12" font-weight="800">K3s</text>
+  <text x="1060" y="777" class="nodehead">Docker worker container · rancher/k3s agent</text><text x="1060" y="799" class="body">joins consumer server with one-session token · CPU/RAM limits · per-session volume</text><text x="1060" y="816" class="tiny muted">GPU scheduling currently not configured in worker startup</text>
+  <rect x="993" y="847" width="741" height="91" rx="12" fill="#f6f8fb" stroke="#dbe5ef"/>
+  <text x="1013" y="875" class="nodehead" font-size="15">Local execution tools</text>
+  <text x="1013" y="900" class="body">🐳 Docker CLI runs/removes worker  ·  ☸ kubectl exec backs node/pod terminal  ·  📊 provider metrics read Docker stats</text>
+  <text x="1013" y="921" class="tiny muted">Input/output archives: authenticated HTTP directly across the NetBird overlay</text>
+
+  <!-- arrows linking planes -->
+  <path d="M472 684H580" class="private"/><text x="526" y="670" class="tiny muted" text-anchor="middle">private peer</text>
+  <path d="M883 684H980" class="private"/><text x="931" y="670" class="tiny muted" text-anchor="middle">HTTP :47631</text>
+  <path d="M1550 306H1740V449H850V538" fill="none" stroke="#139b9b" stroke-width="2.1" stroke-dasharray="7 6" marker-end="url(#arrowTeal)"/>
+  <text x="1198" y="443" class="tiny muted" text-anchor="middle">Lambda creates temporary group / policy</text>
+
+  <!-- Cluster band -->
+  <rect x="38" y="991" width="1724" height="136" rx="18" fill="#172f4d"/>
+  <text x="64" y="1024" class="white" font-size="13" font-weight="700" letter-spacing="1.2">03  /  SESSION KUBERNETES CLUSTER · CONTROL PLANE ON CONSUMER, WORKER NODES ON PROVIDERS</text>
+  <rect x="66" y="1044" width="340" height="58" rx="11" fill="#28496d" stroke="#527499"/>
+  <text x="88" y="1068" class="white" font-size="15" font-weight="700">🐳 Consumer K3s server</text><text x="88" y="1089" class="white" font-size="12" opacity=".8">API :6443 · VXLAN :8472 · kubelet :10250</text>
+  <path d="M410 1073H581" fill="none" stroke="#8ccdc6" stroke-width="2.5" marker-end="url(#arrowTeal)"/>
+  <text x="496" y="1061" class="white" font-size="11" text-anchor="middle" opacity=".85">Kubernetes API + VXLAN</text>
+  <rect x="594" y="1044" width="334" height="58" rx="11" fill="#28496d" stroke="#527499"/>
+  <text x="616" y="1068" class="white" font-size="15" font-weight="700">🐳 Provider K3s agents</text><text x="616" y="1089" class="white" font-size="12" opacity=".8">Ready nodes join with session token</text>
+  <path d="M934 1073H1105" fill="none" stroke="#8ccdc6" stroke-width="2.5" marker-end="url(#arrowTeal)"/>
+  <text x="1017" y="1061" class="white" font-size="11" text-anchor="middle" opacity=".85">schedule by affinity</text>
+  <rect x="1118" y="1044" width="280" height="58" rx="11" fill="#28496d" stroke="#527499"/>
+  <text x="1140" y="1068" class="white" font-size="15" font-weight="700">☸ Kubernetes Jobs / Pods</text><text x="1140" y="1089" class="white" font-size="12" opacity=".8">resource requests · node affinity</text>
+  <path d="M1404 1073H1460" fill="none" stroke="#8ccdc6" stroke-width="2.5" marker-end="url(#arrowTeal)"/>
+  <rect x="1472" y="1044" width="260" height="58" rx="11" fill="#28496d" stroke="#527499"/>
+  <text x="1492" y="1068" class="white" font-size="15" font-weight="700">📁 Consumer files</text><text x="1492" y="1089" class="white" font-size="12" opacity=".8">/workspace · output stays local</text>
+
+  <!-- flow strip -->
+  <text x="52" y="1167" class="label">04  /  END-TO-END SESSION FLOW</text>
+  <g font-size="12" font-weight="650">
+    <rect x="48" y="1185" width="201" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="72" cy="1209" r="13" fill="#e9a640"/><text x="72" y="1213" text-anchor="middle" class="white" font-size="10">1</text><text x="94" y="1213">Sign in + inspect</text><text x="64" y="1241" class="tiny muted" font-weight="400">Cognito · hardware readiness</text>
+    <path d="M251 1225H267" class="flow"/>
+    <rect x="273" y="1185" width="201" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="297" cy="1209" r="13" fill="#3b82d0"/><text x="297" y="1213" text-anchor="middle" class="white" font-size="10">2</text><text x="319" y="1213">Discover + request</text><text x="289" y="1241" class="tiny muted" font-weight="400">provider list · resource offer</text>
+    <path d="M476 1225H492" class="flow"/>
+    <rect x="498" y="1185" width="201" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="522" cy="1209" r="13" fill="#3b82d0"/><text x="522" y="1213" text-anchor="middle" class="white" font-size="10">3</text><text x="544" y="1213">Chat + accept</text><text x="514" y="1241" class="tiny muted" font-weight="400">provider approval in DynamoDB</text>
+    <path d="M701 1225H717" class="flow"/>
+    <rect x="723" y="1185" width="201" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="747" cy="1209" r="13" fill="#149b91"/><text x="747" y="1213" text-anchor="middle" class="white" font-size="10">4</text><text x="769" y="1213">Grant peer access</text><text x="739" y="1241" class="tiny muted" font-weight="400">temporary NetBird policy</text>
+    <path d="M926 1225H942" class="flow"/>
+    <rect x="948" y="1185" width="201" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="972" cy="1209" r="13" fill="#e58b37"/><text x="972" y="1213" text-anchor="middle" class="white" font-size="10">5</text><text x="994" y="1213">Start K3s server</text><text x="964" y="1241" class="tiny muted" font-weight="400">consumer Docker Desktop</text>
+    <path d="M1151 1225H1167" class="flow"/>
+    <rect x="1173" y="1185" width="201" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="1197" cy="1209" r="13" fill="#249b5a"/><text x="1197" y="1213" text-anchor="middle" class="white" font-size="10">6</text><text x="1219" y="1213">Join worker nodes</text><text x="1189" y="1241" class="tiny muted" font-weight="400">authenticated peer API</text>
+    <path d="M1376 1225H1392" class="flow"/>
+    <rect x="1398" y="1185" width="201" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="1422" cy="1209" r="13" fill="#7566c9"/><text x="1422" y="1213" text-anchor="middle" class="white" font-size="10">7</text><text x="1444" y="1213">Run + monitor jobs</text><text x="1414" y="1241" class="tiny muted" font-weight="400">kubectl · affinity · resources</text>
+    <path d="M1601 1225H1617" class="flow"/>
+    <rect x="1623" y="1185" width="129" height="80" rx="12" fill="#fff" stroke="#d9e3ee"/><circle cx="1647" cy="1209" r="13" fill="#586f88"/><text x="1647" y="1213" text-anchor="middle" class="white" font-size="10">8</text><text x="1668" y="1207">Collect</text><text x="1639" y="1241" class="tiny muted" font-weight="400">output local</text>
+  </g>
+  <text x="52" y="1300" class="tiny muted">Tool key: ⚛ React  ·  🦀 Rust/Tauri  ·  🔐 Cognito  ·  🚪 API Gateway  ·  λ Lambda  ·  🗄 DynamoDB  ·  🔗 NetBird  ·  🐳 Docker  ·  ☸ Kubernetes  ·  📁 consumer workspace</text>
+</svg>

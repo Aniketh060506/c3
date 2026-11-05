@@ -354,8 +354,23 @@ fn start_worker_container(session: &str, provider_ip: &str, server_ip: &str, tok
     let vol = docker_output(&["volume", "create", &volume])?;
     if !vol.status.success() { return Err(format!("Could not create provider workload volume: {}", String::from_utf8_lossy(&vol.stderr))); }
     let image = "rancher/k3s:v1.31.5-k3s1";
+    // When consumer and provider are the same NetBird peer, both Docker nodes
+    // would otherwise advertise the same host IP and publish kubelet port 10250
+    // there. Kubernetes then proxies `kubectl exec` to the wrong kubelet. On a
+    // shared Docker host, let the worker advertise its unique bridge IP instead;
+    // the control-plane container can reach it directly on the Docker bridge.
+    let same_docker_host = provider_ip == server_ip;
     let mut args = vec!["run".to_string(), "-d".into(), "--name".into(), container.clone(), "--label".into(), "com.computepool.managed=true".into(), "--label".into(), "com.computepool.role=worker".into(), "--privileged".into()];
-    args.extend(["--cpus".into(), cpu_limit.to_string(), "--memory".into(), format!("{memory_limit}b"), "--memory-swap".into(), format!("{memory_limit}b"), "--publish".into(), format!("{provider_ip}:8472:8472/udp"), "--publish".into(), format!("{provider_ip}:10250:10250/tcp"), "--volume".into(), format!("{volume}:/workspace"), "--env".into(), format!("K3S_URL=https://{server_ip}:6443"), "--env".into(), format!("K3S_TOKEN={token}"), "--env".into(), format!("K3S_NODE_NAME={name}"), image.into(), "agent".into(), "--node-ip".into(), provider_ip.into(), "--node-external-ip".into(), provider_ip.into()]);
+    args.extend(["--cpus".into(), cpu_limit.to_string(), "--memory".into(), format!("{memory_limit}b"), "--memory-swap".into(), format!("{memory_limit}b")]);
+    if !same_docker_host {
+        args.extend(["--publish".into(), format!("{provider_ip}:8472:8472/udp"), "--publish".into(), format!("{provider_ip}:10250:10250/tcp")]);
+    }
+    args.extend(["--volume".into(), format!("{volume}:/workspace"), "--env".into(), format!("K3S_URL=https://{server_ip}:6443"), "--env".into(), format!("K3S_TOKEN={token}"), "--env".into(), format!("K3S_NODE_NAME={name}"), image.into(), "agent".into()]);
+    if same_docker_host {
+        args.extend(["--node-external-ip".into(), provider_ip.into()]);
+    } else {
+        args.extend(["--node-ip".into(), provider_ip.into(), "--node-external-ip".into(), provider_ip.into()]);
+    }
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     match docker_output(&refs) {
         Ok(output) if output.status.success() => output,
