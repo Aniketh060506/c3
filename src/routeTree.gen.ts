@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as BatchJobsRouteImport } from './routes/batch-jobs'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as ClusterRouteImport } from './routes/cluster'
+import { Route as HistoryRouteImport } from './routes/history'
 import { Route as MarketplaceRouteImport } from './routes/marketplace'
 import { Route as NetbirdRouteImport } from './routes/netbird'
 import { Route as TerminalRouteImport } from './routes/terminal'
@@ -39,6 +40,11 @@ const ChatRoute = ChatRouteImport.update({
 const ClusterRoute = ClusterRouteImport.update({
   id: '/cluster',
   path: '/cluster',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HistoryRoute = HistoryRouteImport.update({
+  id: '/history',
+  path: '/history',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MarketplaceRoute = MarketplaceRouteImport.update({
@@ -82,6 +88,7 @@ export interface FileRoutesByFullPath {
   '/batch-jobs': typeof BatchJobsRoute
   '/chat': typeof ChatRoute
   '/cluster': typeof ClusterRoute
+  '/history': typeof HistoryRoute
   '/marketplace': typeof MarketplaceRoute
   '/netbird': typeof NetbirdRoute
   '/terminal': typeof TerminalRoute
@@ -95,6 +102,7 @@ export interface FileRoutesByTo {
   '/batch-jobs': typeof BatchJobsRoute
   '/chat': typeof ChatRoute
   '/cluster': typeof ClusterRoute
+  '/history': typeof HistoryRoute
   '/marketplace': typeof MarketplaceRoute
   '/netbird': typeof NetbirdRoute
   '/terminal': typeof TerminalRoute
@@ -109,6 +117,7 @@ export interface FileRoutesById {
   '/batch-jobs': typeof BatchJobsRoute
   '/chat': typeof ChatRoute
   '/cluster': typeof ClusterRoute
+  '/history': typeof HistoryRoute
   '/marketplace': typeof MarketplaceRoute
   '/netbird': typeof NetbirdRoute
   '/terminal': typeof TerminalRoute
@@ -124,6 +133,7 @@ export interface FileRouteTypes {
     | '/batch-jobs'
     | '/chat'
     | '/cluster'
+    | '/history'
     | '/marketplace'
     | '/netbird'
     | '/terminal'
@@ -137,6 +147,7 @@ export interface FileRouteTypes {
     | '/batch-jobs'
     | '/chat'
     | '/cluster'
+    | '/history'
     | '/marketplace'
     | '/netbird'
     | '/terminal'
@@ -150,6 +161,7 @@ export interface FileRouteTypes {
     | '/batch-jobs'
     | '/chat'
     | '/cluster'
+    | '/history'
     | '/marketplace'
     | '/netbird'
     | '/terminal'
@@ -164,6 +176,7 @@ export interface RootRouteChildren {
   BatchJobsRoute: typeof BatchJobsRoute
   ChatRoute: typeof ChatRoute
   ClusterRoute: typeof ClusterRoute
+  HistoryRoute: typeof HistoryRoute
   MarketplaceRoute: typeof MarketplaceRoute
   NetbirdRoute: typeof NetbirdRoute
   TerminalRoute: typeof TerminalRoute
@@ -201,6 +214,13 @@ declare module '@tanstack/react-router' {
       path: '/cluster'
       fullPath: '/cluster'
       preLoaderRoute: typeof ClusterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/history': {
+      id: '/history'
+      path: '/history'
+      fullPath: '/history'
+      preLoaderRoute: typeof HistoryRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/marketplace': {
@@ -260,6 +280,7 @@ const rootRouteChildren: RootRouteChildren = {
   BatchJobsRoute: BatchJobsRoute,
   ChatRoute: ChatRoute,
   ClusterRoute: ClusterRoute,
+  HistoryRoute: HistoryRoute,
   MarketplaceRoute: MarketplaceRoute,
   NetbirdRoute: NetbirdRoute,
   TerminalRoute: TerminalRoute,

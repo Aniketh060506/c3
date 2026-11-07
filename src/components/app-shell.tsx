@@ -1,10 +1,12 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
-import { Boxes, Gauge, LayoutGrid, MessageCircle, Network, Store, Inbox, Cpu } from "lucide-react";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { Boxes, Gauge, LayoutGrid, MessageCircle, Network, Store, Inbox, Cpu, History, Power, LoaderCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { SignOutButton } from "@/components/auth-gate";
 import { IconTile } from "@/components/kit";
+import { nativeActivity, providerService, type ProviderStatus } from "@/lib/platform";
 
 const consumerNav = [
   { to: "/marketplace", label: "Find providers", icon: Store },
@@ -20,6 +22,15 @@ const providerNav = [
 export function AppShell({ children, username, signOut }: { children: ReactNode; username: string; signOut: () => Promise<void> }) {
   const path = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
+  const [providerPresence, setProviderPresence] = useState<ProviderStatus | null>(null);
+  const pendingNativeCalls = useSyncExternalStore(nativeActivity.subscribe, nativeActivity.count, () => 0);
+  useEffect(() => {
+    let active = true;
+    const heartbeat = async () => { try { const status = await providerService.status(); if (active) setProviderPresence(status); } catch { /* Keep the last confirmed presence through brief network/API failures. */ } };
+    void heartbeat();
+    const timer = window.setInterval(() => void heartbeat(), 15000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
   const mode: "consumer" | "provider" = path.startsWith("/provider") ? "provider" : "consumer";
   const nav = mode === "consumer" ? consumerNav : providerNav;
 
@@ -27,11 +38,11 @@ export function AppShell({ children, username, signOut }: { children: ReactNode;
     <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r border-border bg-sidebar p-4 md:flex">
       <Link to="/" className="mb-7 flex items-center gap-2.5 px-2"><span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground"><Boxes className="size-5" /></span><span><span className="block font-display text-lg font-bold leading-none">ComputePool</span><span className="mt-1 block font-mono text-[10px] text-muted-foreground">Windows desktop</span></span></Link>
       <div className="mb-6 rounded-2xl bg-muted p-1"><div className="relative grid grid-cols-2 text-sm font-semibold">{(["consumer", "provider"] as const).map((m) => <button key={m} onClick={() => navigate({ to: m === "consumer" ? "/marketplace" : "/provider" })} className={cn("relative z-10 rounded-xl py-2.5 capitalize transition-colors", mode === m ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>{mode === m && <motion.span layoutId="mode-thumb" className="absolute inset-0 -z-10 rounded-xl bg-card shadow-soft" transition={{ type: "spring", stiffness: 400, damping: 32 }} />}{m}</button>)}</div></div>
-      <nav className="flex flex-col gap-1"><NavItem to="/" label="Machine readiness" icon={LayoutGrid} active={path === "/"} /><NavItem to="/netbird" label="NetBird setup" icon={Network} active={path === "/netbird"} /><LayoutGroup><AnimatePresence mode="wait"><motion.div key={mode} initial={{ opacity: 0, x: mode === "consumer" ? -12 : 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: mode === "consumer" ? 12 : -12 }} transition={{ duration: 0.18 }} className="flex flex-col gap-1"><p className="mb-1 mt-5 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">{mode} path</p>{nav.map((item) => <NavItem key={item.to} to={item.to} label={item.label} icon={item.icon} active={path === item.to || (item.to === "/cluster" && path === "/terminal")} />)}</motion.div></AnimatePresence></LayoutGroup></nav>
+      <nav className="flex flex-col gap-1"><NavItem to="/" label="Machine readiness" icon={LayoutGrid} active={path === "/"} /><NavItem to="/netbird" label="NetBird setup" icon={Network} active={path === "/netbird"} /><NavItem to="/history" label="Account history" icon={History} active={path === "/history"} /><LayoutGroup><AnimatePresence mode="wait"><motion.div key={mode} initial={{ opacity: 0, x: mode === "consumer" ? -12 : 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: mode === "consumer" ? 12 : -12 }} transition={{ duration: 0.18 }} className="flex flex-col gap-1"><p className="mb-1 mt-5 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">{mode} path</p>{nav.map((item) => <NavItem key={item.to} to={item.to} label={item.label} icon={item.icon} active={path === item.to || (item.to === "/cluster" && path === "/terminal")} />)}</motion.div></AnimatePresence></LayoutGroup></nav>
       <div className="mt-auto rounded-2xl border border-border bg-white p-4 shadow-soft"><p className="flex items-center gap-2 text-xs font-semibold"><IconTile icon={Cpu} tone="blue" size="sm" />Local machine first</p><p className="mt-2 text-xs leading-relaxed text-muted-foreground">Hardware and dependency status are read from this laptop. Provider data appears only when connected to the live service.</p></div>
     </aside>
     <div className="flex min-w-0 flex-1 flex-col">
-      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/85 px-5 py-3 backdrop-blur-xl md:px-8"><Link to="/" className="flex items-center gap-2 font-semibold md:hidden"><Boxes className="size-5 text-primary" />ComputePool</Link><div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex"><span className="size-2 rounded-full bg-primary" />{mode === "consumer" ? "Consumer workflow" : "Provider workflow"}</div><div className="flex items-center gap-1 rounded-full border border-border bg-card p-1 text-xs font-semibold md:hidden">{(["consumer", "provider"] as const).map((m) => <button key={m} onClick={() => navigate({ to: m === "consumer" ? "/marketplace" : "/provider" })} className={cn("rounded-full px-3 py-1.5 capitalize", mode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>{m}</button>)}</div><SignOutButton username={username} onSignOut={signOut} /></header>
+      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/85 px-5 py-3 backdrop-blur-xl md:px-8"><Link to="/" className="flex items-center gap-2 font-semibold md:hidden"><Boxes className="size-5 text-primary" />ComputePool</Link><div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex"><span className="size-2 rounded-full bg-primary" />{mode === "consumer" ? "Consumer workflow" : "Provider workflow"}</div><div className="flex items-center gap-2"><div className="flex items-center gap-1 rounded-full border border-border bg-card p-1 text-xs font-semibold md:hidden">{(["consumer", "provider"] as const).map((m) => <button key={m} onClick={() => navigate({ to: m === "consumer" ? "/marketplace" : "/provider" })} className={cn("rounded-full px-3 py-1.5 capitalize", mode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>{m}</button>)}</div>{pendingNativeCalls > 0 && <div role="status" aria-live="polite" title={nativeActivity.label()} className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-800"><LoaderCircle className="size-3.5 animate-spin" /><span className="hidden sm:inline">{nativeActivity.label() || "Working"}</span></div>}{providerPresence?.online && <Link to="/provider" className="hidden items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 sm:inline-flex"><IconTile icon={Power} tone="green" size="sm" />Provider online · {providerPresence.activeSessions} active</Link>}<SignOutButton username={username} onSignOut={signOut} /></div></header>
       <AnimatePresence mode="wait"><motion.main key={path} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.2 }} className="flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-8">{children}</motion.main></AnimatePresence>
     </div>
   </div>;

@@ -51,8 +51,14 @@ const saveMessage = async (conversationId, actor, text, proposal) => {
   return message;
 };
 const messagesFor = async (conversationId) => {
-  const result = await ddb.send(new QueryCommand({ TableName: tables.messages, KeyConditionExpression: "conversationId = :id", ExpressionAttributeValues: { ":id": conversationId }, ScanIndexForward: true }));
-  return result.Items ?? [];
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const result = await ddb.send(new QueryCommand({ TableName: tables.messages, KeyConditionExpression: "conversationId = :id", ExpressionAttributeValues: { ":id": conversationId }, ScanIndexForward: true, ExclusiveStartKey }));
+    items.push(...(result.Items ?? []));
+    ExclusiveStartKey = result.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items;
 };
 let netbirdToken;
 async function getNetBirdToken() {

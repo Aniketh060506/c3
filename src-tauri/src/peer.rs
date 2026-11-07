@@ -26,7 +26,7 @@ struct PeerServer(Arc<PeerState>);
 struct PeerState {
     jwks: Value,
     profile: Mutex<Value>,
-    cluster_sessions: Mutex<HashMap<String, (String, String, String, String)>>,
+    cluster_sessions: Mutex<HashMap<String, (String, String, String, String, f64, u64, Vec<String>)>>,
     starting_sessions: Mutex<HashMap<String, (String, String)>>,
     cancelled_sessions: Mutex<HashSet<String>>,
 }
@@ -169,6 +169,7 @@ async fn join_cluster(State(server): State<PeerServer>, Extension(identity): Ext
         }
         starting.insert(draft.session_id.clone(), (identity.sub.clone(), draft.consumer_request_id.clone()));
     }
+    let telemetry_gpu_ids = requested_gpu_ids.clone();
     let start_session_id = session_id.clone();
     let worker_result = tokio::task::spawn_blocking(move || start_worker_container(&start_session_id, &ip, &server_ip, &token, requested_cpu, requested_memory, &requested_gpu_ids)).await;
     let result = match worker_result {
@@ -192,7 +193,7 @@ async fn join_cluster(State(server): State<PeerServer>, Extension(identity): Ext
             starting.remove(&draft.session_id);
             true
         } else {
-            sessions.insert(draft.session_id.clone(), (identity.sub.clone(), identity.name.clone(), now_iso(), consumer_request_id));
+            sessions.insert(draft.session_id.clone(), (identity.sub.clone(), identity.name.clone(), now_iso(), consumer_request_id, requested_cpu, requested_memory, telemetry_gpu_ids));
             starting.remove(&draft.session_id);
             false
         }
@@ -415,21 +416,51 @@ pub fn set_local_limits(limits: Value) -> Result<Value, String> {
 pub fn local_sessions() -> Vec<Value> {
     let Some(server) = SERVER.get() else { return Vec::new(); };
     let Ok(sessions) = server.cluster_sessions.lock() else { return Vec::new(); };
-    sessions.iter().map(|(id, (_, consumer, started_at, _))| {
+    sessions.iter().map(|(id, (owner_sub, consumer, started_at, request_id, requested_cpu, requested_memory, requested_gpu_ids))| {
         let container = format!("cp-agent-{id}");
-        let stats = hidden_command("docker.exe").args(["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", &container]).output()
-            .or_else(|_| hidden_command("docker").args(["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", &container]).output()).ok();
-        let (cpu, memory) = stats.filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok()).and_then(|s| {
+        // Docker's no-stream stats are the actual per-session worker container,
+        // not host-wide utilization or the negotiated allocation estimate.
+        let stats = hidden_command("docker.exe").args(["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}|{{.PIDs}}", &container]).output()
+            .or_else(|_| hidden_command("docker").args(["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}|{{.PIDs}}", &container]).output()).ok();
+        let parsed = stats.filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok()).and_then(|s| {
             let mut parts = s.trim().split('|');
             let cpu = parts.next()?.trim().trim_end_matches('%').parse::<f32>().ok();
-            let memory_text = parts.next()?.split('/').next()?.trim();
-            let split_at = memory_text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(memory_text.len());
-            let number = memory_text[..split_at].parse::<f64>().ok()?;
-            let factor = match &memory_text[split_at..] { "GiB" => 1024_f64.powi(3), "MiB" => 1024_f64.powi(2), "KiB" => 1024_f64, _ => 1.0 };
-            Some((cpu, Some((number * factor) as u64)))
-        }).unwrap_or((None, None));
-        json!({"id": id, "consumer": consumer, "state": "active", "startedAt": started_at, "cpuPercent": cpu, "memoryBytes": memory})
+            let memory_text = parts.next()?.trim();
+            let mut memory_parts = memory_text.split('/');
+            let memory = parse_docker_bytes(memory_parts.next()?.trim());
+            let memory_limit = parse_docker_bytes(memory_parts.next()?.trim());
+            let memory_percent = parts.next()?.trim().trim_end_matches('%').parse::<f32>().ok();
+            let (network_rx, network_tx) = parse_docker_pair(parts.next()?.trim());
+            let (block_read, block_write) = parse_docker_pair(parts.next()?.trim());
+            let pids = parts.next()?.trim().parse::<u64>().ok();
+            Some((cpu, memory, memory_limit, memory_percent, network_rx, network_tx, block_read, block_write, pids))
+        });
+        let (cpu, memory, memory_limit, memory_percent, network_rx, network_tx, block_read, block_write, pids) =
+            parsed.map(|s| (Some(s.0), s.1, s.2, s.3, s.4, s.5, s.6, s.7, s.8)).unwrap_or((None, None, None, None, None, None, None, None, None));
+        json!({"id": id, "ownerSub": owner_sub, "consumerRequestId": request_id, "consumer": consumer, "state": "active", "startedAt": started_at,
+            "containerName": container, "telemetryAvailable": cpu.is_some() || memory.is_some(), "cpuPercent": cpu,
+            "memoryBytes": memory, "memoryLimitBytes": memory_limit, "memoryPercent": memory_percent,
+            "networkRxBytes": network_rx, "networkTxBytes": network_tx, "blockReadBytes": block_read, "blockWriteBytes": block_write, "processCount": pids,
+            "requestedCpuCores": requested_cpu, "requestedMemoryBytes": requested_memory, "requestedGpuIds": requested_gpu_ids})
     }).collect()
+}
+
+fn parse_docker_bytes(value: &str) -> Option<u64> {
+    let split_at = value.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(value.len());
+    let number = value[..split_at].trim().parse::<f64>().ok()?;
+    let unit = value[split_at..].trim();
+    let factor = match unit {
+        "B" | "bytes" => 1_f64,
+        "kB" => 1_000_f64, "MB" => 1_000_f64.powi(2), "GB" => 1_000_f64.powi(3), "TB" => 1_000_f64.powi(4),
+        "KiB" => 1024_f64, "MiB" => 1024_f64.powi(2), "GiB" => 1024_f64.powi(3), "TiB" => 1024_f64.powi(4),
+        _ => return None,
+    };
+    Some((number * factor).max(0.0) as u64)
+}
+
+fn parse_docker_pair(value: &str) -> (Option<u64>, Option<u64>) {
+    let mut parts = value.split('/');
+    (parts.next().and_then(|part| parse_docker_bytes(part.trim())), parts.next().and_then(|part| parse_docker_bytes(part.trim())))
 }
 
 pub fn shutdown_workers() -> Result<(), String> {

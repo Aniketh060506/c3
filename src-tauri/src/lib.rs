@@ -681,36 +681,79 @@ async fn create_interactive_pod(cluster_id: String, image: String, cpu_cores: u3
     }
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let pod_name = format!("cp-shell-{stamp}");
-    let mut resources = format!("cpu={cpu_cores},memory={memory_gib}Gi");
-    if gpu_count > 0 { resources.push_str(&format!(",nvidia.com/gpu={gpu_count}")); }
-    let mut args = vec!["run", &pod_name, "--namespace", &namespace, "--image", image.trim(), "--restart=Never", "--requests", &resources, "--limits", &resources];
-    args.extend(["--command", "--", "sh", "-lc", "sleep infinity"]);
-    let output = cluster_output(&cluster_id, &args).ok_or_else(|| "kubectl is not installed or not on PATH.".to_string())?;
-    if !output.status.success() { return Err(format!("Could not create the interactive pod: {}", output_text(&output))); }
-    let full_name = format!("pod/{pod_name}");
-    let wait_args = ["wait", "--namespace", namespace.as_str(), "--for=condition=Ready", full_name.as_str(), "--timeout=120s"];
-    match cluster_output(&cluster_id, &wait_args) {
-        Some(output) if output.status.success() => {}
-        Some(output) => {
-            let _ = cluster_output(&cluster_id, &["delete", "pod", "--namespace", namespace.as_str(), pod_name.as_str(), "--ignore-not-found=true", "--wait=false"]);
-            return Err(format!("Pod {pod_name} did not become ready and was removed: {}. Check node capacity and image access.", output_text(&output)));
-        }
-        None => {
-            let _ = cluster_output(&cluster_id, &["delete", "pod", "--namespace", namespace.as_str(), pod_name.as_str(), "--ignore-not-found=true", "--wait=false"]);
-            return Err("Could not wait for the Kubernetes pod; the failed pod was removed.".into());
-        }
+    let mut requests = json!({"cpu": cpu_cores.to_string(), "memory": format!("{memory_gib}Gi")});
+    let mut limits = requests.clone();
+    if gpu_count > 0 {
+        requests["nvidia.com/gpu"] = json!(gpu_count.to_string());
+        limits["nvidia.com/gpu"] = json!(gpu_count.to_string());
     }
+    let pod_spec = json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": pod_name, "namespace": namespace, "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/role": "interactive-shell"}},
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [{
+                "name": "shell",
+                "image": image.trim(),
+                "imagePullPolicy": if image.trim().ends_with(":latest") || !image.trim().contains(':') { "Always" } else { "IfNotPresent" },
+                "command": ["/bin/sh", "-lc", "sleep infinity"],
+                "resources": {"requests": requests, "limits": limits}
+            }]
+        }
+    });
+    let manifest = serde_json::to_vec(&pod_spec).map_err(|error| format!("Could not encode the pod specification: {error}"))?;
+    let output = kubectl_with_input(&["create", "-f", "-"], &manifest)?;
+    if !output.status.success() { return Err(format!("Could not create the interactive pod: {}", output_text(&output))); }
+    // Return as soon as the API server accepts the pod. Image pulls can take
+    // longer than a fixed kubectl wait timeout, and deleting the pod here
+    // prevents kubelet's own ImagePullBackOff retry from recovering.
     Ok(json!({"namespace": namespace, "podName": pod_name, "image": image.trim(), "cpuCores": cpu_cores, "memoryGiB": memory_gib, "gpuCount": gpu_count}))
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn open_pod_shell(cluster_id: String, namespace: String, pod_name: String, container: Option<String>) -> Result<Value, String> {
+    if cluster_id != SHARED_CLUSTER_ID { return Err("The selected ComputePool cluster is no longer active. Return to Session dashboard and reconnect.".into()); }
+    if namespace.is_empty() || namespace.len() > 63 || !namespace.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        || pod_name.is_empty() || pod_name.len() > 63 || !pod_name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
+        return Err("The pod name or namespace is invalid.".into());
+    }
     let mut args = vec!["exec", "--namespace", namespace.as_str(), pod_name.as_str()];
     if let Some(container) = container.as_deref() { args.extend(["--container", container]); }
     args.extend(["--", "sh", "-lc", "printf 'pod shell ready\\n'"]);
-    let output = cluster_output(&cluster_id, &args).ok_or_else(|| "kubectl is not installed or not on PATH.".to_string())?;
-    if !output.status.success() { return Err(format!("Could not open Kubernetes pod shell: {}", output_text(&output))); }
-    Ok(json!({"shellId": format!("pod:{cluster_id}:{namespace}:{pod_name}:{}", container.unwrap_or_default())}))
+    let mut last_error = String::new();
+    // Kubelet retries image pulls with exponential backoff. Keep the pod alive
+    // long enough for transient registry/DNS/TLS failures to recover instead
+    // of deleting it after a short startup timeout.
+    for attempt in 0..60 {
+        let output = cluster_output(&cluster_id, &args).ok_or_else(|| "Docker could not open the pod shell. Confirm Docker Desktop is running and the ComputePool K3s container is available.".to_string())?;
+        if output.status.success() {
+            return Ok(json!({"shellId": format!("pod:{cluster_id}:{namespace}:{pod_name}:{}", container.unwrap_or_default())}));
+        }
+        last_error = output_text(&output);
+        let transient = {
+            let message = last_error.to_lowercase();
+            message.contains("pod does not exist") || message.contains("unable to upgrade connection")
+                || message.contains("container not found") || message.contains("container is not running")
+                || message.contains("connection refused") || message.contains("timed out")
+                || message.contains("imagepullbackoff") || message.contains("errimagepull")
+                || message.contains("containercreating") || message.contains("waiting to start")
+        };
+        if !transient || attempt == 59 { break; }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    let status = cluster_output(&cluster_id, &["get", "pod", "--namespace", namespace.as_str(), pod_name.as_str(), "-o", "json"])
+        .filter(|output| output.status.success()).and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok()).map(|pod| {
+            let phase = pod.pointer("/status/phase").and_then(Value::as_str).unwrap_or("unknown");
+            let node = pod.pointer("/spec/nodeName").and_then(Value::as_str).unwrap_or("not scheduled");
+            let container = pod.pointer("/status/containerStatuses/0/state/waiting");
+            let reason = container.and_then(|state| state.get("reason")).and_then(Value::as_str).unwrap_or("none");
+            let detail = container.and_then(|state| state.get("message")).and_then(Value::as_str).unwrap_or("");
+            format!("phase={phase}, node={node}, reason={reason}{}", if detail.is_empty() { String::new() } else { format!(", detail={detail}") })
+        });
+    let events = cluster_output(&cluster_id, &["get", "events", "--namespace", namespace.as_str(), "--field-selector", &format!("involvedObject.name={pod_name}"), "--sort-by=.lastTimestamp"])
+        .filter(|output| output.status.success()).map(|output| output_text(&output)).filter(|text| !text.is_empty());
+    Err(format!("Pod {namespace}/{pod_name} is kept running its image-pull retries; the terminal is not connected yet. Last exec error: {}. Current pod: {}. Recent Kubernetes events: {}. Use Reconnect terminal after registry access recovers.", last_error.trim(), status.unwrap_or_else(|| "status unavailable".into()), events.unwrap_or_else(|| "none returned".into())))
 }
 
 #[tauri::command]
@@ -973,7 +1016,13 @@ async fn get_provider_details(provider_id: String) -> Result<Value, String> {
 #[tauri::command]
 async fn list_negotiations() -> Result<Vec<Value>, String> {
     let value = computepool_api("GET", "/negotiations", None).await?;
-    value.as_array().cloned().ok_or_else(|| "ComputePool negotiation service returned invalid data.".into())
+    let sub = current_identity_claims()?.get("sub").and_then(Value::as_str).unwrap_or_default().to_string();
+    let items = value.as_array().cloned().ok_or_else(|| "ComputePool negotiation service returned invalid data.".to_string())?;
+    Ok(items.into_iter().map(|mut item| {
+        let role = if item.get("providerSub").and_then(Value::as_str) == Some(sub.as_str()) { "provider" } else { "consumer" };
+        if let Some(object) = item.as_object_mut() { object.insert("myRole".into(), json!(role)); }
+        item
+    }).collect())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1028,6 +1077,25 @@ async fn decide_resource_proposal(message_id: String, decision: String) -> Resul
     Ok(())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn close_negotiation_request(negotiation_id: String) -> Result<(), String> {
+    if negotiation_id.is_empty() || negotiation_id.len() > 100 || !negotiation_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Negotiation ID is invalid.".into());
+    }
+    let request_is_in_active_session = {
+        let active = ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "Session state is unavailable.")?;
+        active.as_ref().and_then(|state| state.get("negotiationIds")).and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(negotiation_id.as_str())))
+    };
+    if request_is_in_active_session {
+        return Err("This request is part of the connected cluster. End the session from Session dashboard before closing the request.".into());
+    }
+    // The marketplace service verifies that this Cognito identity is the
+    // consumer, removes any temporary NetBird access, and marks the request
+    // ended. That releases the provider for a fresh proposal.
+    let _ = computepool_api("DELETE", "/sessions/netbird", Some(json!({"negotiationIds": [negotiation_id]}))).await?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_provider_status() -> Result<Value, String> {
     let mut profile = peer::local_profile();
@@ -1037,24 +1105,46 @@ async fn get_provider_status() -> Result<Value, String> {
         let sub = claims.get("sub").and_then(Value::as_str).ok_or("Cognito account ID is missing.")?;
         let node_id = provider_node_id(sub);
         let hardware = serde_json::to_value(get_hardware().await?).map_err(|e| e.to_string())?;
-        let netbird = get_netbird_status().await?;
+        // A route/mode switch must not drop provider presence. Use the setup-key
+        // flow from the heartbeat to recover a temporarily disconnected daemon.
+        let netbird = match get_netbird_status().await {
+            Ok(status) if status.get("connected").and_then(Value::as_bool) == Some(true)
+                && status.get("peerIp").and_then(Value::as_str).is_some() => status,
+            _ => match ensure_netbird_connected("provider").await {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = computepool_api("DELETE", "/providers/me", Some(json!({"nodeId": node_id}))).await;
+                    if let Some(object) = profile.as_object_mut() { object.insert("online".into(), json!(false)); }
+                    let _ = peer::set_online(false, "", profile.clone()).await;
+                    return Ok(json!({"online": false, "activeSessions": peer::local_sessions().len(), "limits": profile.get("limits"), "connectionError": format!("NetBird disconnected. ComputePool tried to reconnect but could not: {error}"), "capturedAt": peer::now_iso()}));
+                }
+            }
+        };
         let Some(ip) = netbird.get("peerIp").and_then(Value::as_str).filter(|_| netbird.get("connected").and_then(Value::as_bool) == Some(true)) else {
             let _ = computepool_api("DELETE", "/providers/me", Some(json!({"nodeId": node_id}))).await;
+            if let Some(object) = profile.as_object_mut() { object.insert("online".into(), json!(false)); }
             let _ = peer::set_online(false, "", profile.clone()).await;
-            return Ok(json!({"online": false, "activeSessions": peer::local_sessions().len(), "connectionError": "NetBird disconnected or has no peer IP. Reconnect NetBird; ComputePool will restore availability while this app remains open.", "capturedAt": peer::now_iso()}));
+            return Ok(json!({"online": false, "activeSessions": peer::local_sessions().len(), "limits": profile.get("limits"), "connectionError": "NetBird disconnected or has no peer IP. ComputePool will try again automatically while this app remains open.", "capturedAt": peer::now_iso()}));
         };
         if let Some(object) = profile.as_object_mut() { object.insert("netbirdIp".into(), json!(ip)); }
         if let Err(error) = peer::set_online(true, ip, profile.clone()).await {
             let _ = computepool_api("DELETE", "/providers/me", Some(json!({"nodeId": node_id}))).await;
-            let _ = peer::set_online(false, "", profile).await;
-            return Ok(json!({"online": false, "activeSessions": peer::local_sessions().len(), "connectionError": error, "capturedAt": peer::now_iso()}));
+            if let Some(object) = profile.as_object_mut() { object.insert("online".into(), json!(false)); }
+            let _ = peer::set_online(false, "", profile.clone()).await;
+            return Ok(json!({"online": false, "activeSessions": peer::local_sessions().len(), "limits": profile.get("limits"), "connectionError": error, "capturedAt": peer::now_iso()}));
         }
-        let value = computepool_api("PUT", "/providers/me", Some(json!({
+        let value = match computepool_api("PUT", "/providers/me", Some(json!({
             "nodeId": node_id, "displayName": profile.get("displayName").cloned().unwrap_or_else(|| claims.get("name").cloned().unwrap_or(json!("ComputePool provider"))),
             "netbirdIp": ip, "netbirdPeerId": profile.get("netbirdPeerId").cloned().unwrap_or(Value::Null), "online": true,
             "limits": profile.get("limits").cloned().unwrap_or(json!({})), "gpuNames": profile.get("gpuNames").cloned().unwrap_or(json!([])),
             "cpuModel": hardware.pointer("/cpu/model").cloned().unwrap_or(Value::Null)
-        }))).await?;
+        }))).await {
+            Ok(value) => value,
+            Err(error) => return Ok(json!({
+                "online": true, "activeSessions": peer::local_sessions().len(), "limits": profile.get("limits"), "capturedAt": peer::now_iso(),
+                "connectionError": format!("This laptop is online locally, but AWS presence could not be refreshed: {error}. ComputePool will retry while the app remains open.")
+            })),
+        };
         if let Ok(negotiations) = list_negotiations().await {
             let accepted_ids = negotiations.iter()
                 .filter(|item| item.get("state").and_then(Value::as_str) == Some("accepted"))
@@ -1063,10 +1153,10 @@ async fn get_provider_status() -> Result<Value, String> {
             if let Err(error) = peer::reconcile_worker_sessions(&accepted_ids) { eprintln!("Provider worker reconciliation failed: {error}"); }
         }
         let active = peer::local_sessions().len();
-        return Ok(json!({ "online": true, "activeSessions": active, "capturedAt": value.get("capturedAt").cloned().unwrap_or(json!(peer::now_iso())) }));
+        return Ok(json!({ "online": true, "activeSessions": active, "limits": profile.get("limits"), "capturedAt": value.get("capturedAt").cloned().unwrap_or(json!(peer::now_iso())) }));
     }
     let active = peer::local_sessions().len();
-    Ok(json!({ "online": false, "activeSessions": active, "capturedAt": peer::now_iso() }))
+    Ok(json!({ "online": false, "activeSessions": active, "limits": profile.get("limits"), "capturedAt": peer::now_iso() }))
 }
 
 async fn mark_provider_offline_on_exit() {
@@ -1137,8 +1227,10 @@ async fn set_provider_online(online: bool) -> Result<Value, String> {
             "nodeId": node_id, "displayName": profile["displayName"], "netbirdIp": ip, "netbirdPeerId": profile["peerId"],
             "online": true, "limits": limits, "gpuNames": profile["gpuNames"], "cpuModel": profile["cpuModel"]
         }))).await {
-            let _ = peer::set_online(false, "", profile).await;
-            return Err(error);
+            return Ok(json!({
+                "online": true, "activeSessions": peer::local_sessions().len(), "capturedAt": peer::now_iso(),
+                "connectionError": format!("This laptop is online locally, but AWS presence could not be published: {error}. ComputePool will retry while the app remains open.")
+            }));
         }
     } else {
         if !peer::local_sessions().is_empty() { return Err("This provider has an active worker session. End the consumer session before stopping availability.".into()); }
@@ -1164,7 +1256,43 @@ async fn list_incoming_requests() -> Result<Vec<Value>, String> {
 async fn list_provider_sessions() -> Result<Vec<Value>, String> {
     let claims = current_identity_claims()?;
     let sub = claims.get("sub").and_then(Value::as_str).ok_or("Cognito account ID is missing.")?;
-    Ok(list_negotiations().await?.into_iter().filter(|item| item.get("providerSub").and_then(Value::as_str) == Some(sub) && item.get("state").and_then(Value::as_str) == Some("accepted")).map(|item| json!({"id":item["id"],"consumer":item.get("consumerName").or_else(|| item.get("consumer")).cloned().unwrap_or(json!("ComputePool consumer")),"state":"active","startedAt":item.get("updatedAt").or_else(||item.get("createdAt")).cloned().unwrap_or(json!(peer::now_iso()))})).collect())
+    let local = peer::local_sessions();
+    Ok(list_negotiations().await?.into_iter()
+        .filter(|item| item.get("providerSub").and_then(Value::as_str) == Some(sub) && item.get("state").and_then(Value::as_str) == Some("accepted"))
+        .map(|item| {
+            let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+            let live = local.iter().find(|session| session.get("consumerRequestId").and_then(Value::as_str) == Some(id));
+            let limits = item.get("requestedLimits").or_else(|| item.pointer("/proposal/limits"));
+            let mut result = live.cloned().unwrap_or_else(|| json!({
+                "id": id,
+                "consumer": item.get("consumerName").or_else(|| item.get("consumer")).cloned().unwrap_or(json!("ComputePool consumer")),
+                "state": "accepted",
+                "startedAt": item.get("updatedAt").or_else(|| item.get("createdAt")).cloned().unwrap_or(json!(peer::now_iso())),
+                "telemetryAvailable": false
+            }));
+            result["id"] = json!(id);
+            result["consumer"] = item.get("consumerName").or_else(|| item.get("consumer")).cloned().unwrap_or(json!("ComputePool consumer"));
+            result["requestedCpuCores"] = limits.and_then(|v| v.get("cpuCores")).cloned().unwrap_or(Value::Null);
+            result["requestedMemoryBytes"] = limits.and_then(|v| v.get("memoryBytes")).cloned().unwrap_or(Value::Null);
+            result["requestedGpuIds"] = limits.and_then(|v| v.get("gpuIds")).cloned().unwrap_or(json!([]));
+            result["durationMinutes"] = item.get("durationMinutes").cloned().unwrap_or(Value::Null);
+            result["workloadDescription"] = item.get("workloadDescription").cloned().unwrap_or(Value::Null);
+            result
+        }).collect())
+}
+
+#[tauri::command]
+async fn list_provider_live_telemetry() -> Result<Vec<Value>, String> {
+    let claims = current_identity_claims()?;
+    let sub = claims.get("sub").and_then(Value::as_str).ok_or("Cognito account ID is missing.")?;
+    Ok(peer::local_sessions().into_iter().filter_map(|mut session| {
+        if session.get("ownerSub").and_then(Value::as_str) != Some(sub) { return None; }
+        let request_id = session.get("consumerRequestId").and_then(Value::as_str).unwrap_or_default().to_string();
+        if request_id.is_empty() { return None; }
+        session["clusterSessionId"] = session.get("id").cloned().unwrap_or(Value::Null);
+        session["id"] = json!(request_id);
+        Some(session)
+    }).collect())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1211,6 +1339,7 @@ async fn send_provider_message(consumer_id: String, body: String) -> Result<(), 
 const SHARED_CLUSTER_ID: &str = "computepool";
 const K3S_SERVER_CONTAINER: &str = "cp-k3s-server";
 const K3S_IMAGE: &str = "rancher/k3s:v1.31.5-k3s1";
+const METRICS_SERVER_MANIFEST: &str = "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml";
 const SESSION_PROGRESS_EVENT: &str = "computepool-session-progress";
 
 fn publish_session_progress(app: &AppHandle, session_id: &str, status: &str, stages: &[Value], error: Option<&str>) {
@@ -1246,6 +1375,59 @@ fn cluster_node_readiness() -> Result<(usize, usize, Vec<String>), String> {
     Ok((ready, nodes.len(), summary))
 }
 
+fn install_metrics_server() -> Result<(), String> {
+    let apply = server_kubectl(&["apply", "-f", METRICS_SERVER_MANIFEST])
+        .ok_or("Docker could not run kubectl to install Kubernetes Metrics Server.")?;
+    if !apply.status.success() {
+        return Err(format!("Could not install Kubernetes Metrics Server: {}", output_text(&apply)));
+    }
+
+    // Laptop worker kubelets normally use certificates that are not signed by
+    // the cluster CA. Metrics Server needs this flag to scrape those kubelets.
+    let deployment = server_kubectl(&["get", "deployment", "metrics-server", "-n", "kube-system", "-o", "json"])
+        .ok_or("Docker could not inspect the Metrics Server deployment.")?;
+    if !deployment.status.success() {
+        return Err(format!("Metrics Server manifest applied, but its deployment could not be read: {}", output_text(&deployment)));
+    }
+    let value: Value = serde_json::from_slice(&deployment.stdout)
+        .map_err(|error| format!("Metrics Server deployment returned invalid JSON: {error}"))?;
+    let args = value.pointer("/spec/template/spec/containers/0/args").and_then(Value::as_array).cloned().unwrap_or_default();
+    if !args.iter().any(|arg| arg.as_str() == Some("--kubelet-insecure-tls")) {
+        let patch = r#"[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]"#;
+        let output = server_kubectl(&["patch", "deployment", "metrics-server", "-n", "kube-system", "--type=json", "-p", patch])
+            .ok_or("Docker could not configure Metrics Server to scrape K3s worker kubelets.")?;
+        if !output.status.success() {
+            return Err(format!("Could not configure Metrics Server kubelet access: {}", output_text(&output)));
+        }
+    }
+
+    let rollout = server_kubectl(&["rollout", "status", "deployment/metrics-server", "-n", "kube-system", "--timeout=120s"])
+        .ok_or("Docker could not wait for Metrics Server to start.")?;
+    if !rollout.status.success() {
+        let logs = server_kubectl(&["logs", "-n", "kube-system", "deployment/metrics-server", "--tail=30"])
+            .map(|output| output_text(&output)).unwrap_or_default();
+        return Err(format!("Metrics Server did not become ready: {}{}", output_text(&rollout), if logs.is_empty() { String::new() } else { format!(". Recent logs: {logs}") }));
+    }
+    Ok(())
+}
+
+fn node_metrics_ready(expected: usize) -> Result<(usize, Vec<String>), String> {
+    let output = server_kubectl(&["get", "--raw", "/apis/metrics.k8s.io/v1beta1/nodes"])
+        .ok_or("Could not query Kubernetes Metrics Server (metrics.k8s.io).")?;
+    if !output.status.success() {
+        return Err(format!("Metrics API is not ready: {}", output_text(&output)));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Metrics Server returned invalid node data: {error}"))?;
+    let names = value.get("items").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|item| item.pointer("/metadata/name").and_then(Value::as_str).map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    if names.len() < expected {
+        return Err(format!("Metrics Server has samples for {}/{} nodes.", names.len(), expected));
+    }
+    Ok((names.len(), names))
+}
+
 fn server_kubectl(args: &[&str]) -> Option<Output> {
     let mut all = vec!["exec", K3S_SERVER_CONTAINER, "kubectl"];
     all.extend_from_slice(args);
@@ -1268,9 +1450,21 @@ fn bootstrap_shared_cluster(ip: &str, workspace: &str) -> Result<String, String>
     let existing = docker_output(&["inspect", K3S_SERVER_CONTAINER]);
     if existing.as_ref().is_some_and(|out| out.status.success()) { return Err("A ComputePool K3s server already exists in Docker. End or recover that session before starting another.".into()); }
     if docker_output(&["volume", "inspect", "cp-k3s-state"]).is_some_and(|out| out.status.success()) {
-        return Err("A stale ComputePool K3s data volume already exists. It was preserved. Remove cp-k3s-state in Docker Desktop only after confirming it contains no session data, then retry.".into());
+        // The control-plane container check above proved no ComputePool cluster
+        // is running. This app-reserved volume contains only K3s state; consumer
+        // project files live in the separate /workspace bind mount. Reclaim the
+        // orphaned volume automatically so a failed/crashed prior bootstrap can
+        // be retried without asking users to operate Docker Desktop manually.
+        let removed = docker_output(&["volume", "rm", "cp-k3s-state"])
+            .ok_or("Docker could not inspect or remove the abandoned ComputePool K3s state volume.")?;
+        if !removed.status.success() {
+            return Err(format!(
+                "An old ComputePool K3s state volume is still in use and was left untouched: {}. Stop the container using cp-k3s-state, then retry.",
+                output_text(&removed)
+            ));
+        }
     }
-    let volume = docker_output(&["volume", "create", "cp-k3s-state"]).ok_or("Docker could not create the K3s data volume.")?;
+    let volume = docker_output(&["volume", "create", "--label", "com.computepool.managed=true", "--label", "com.computepool.role=cluster-state", "cp-k3s-state"]).ok_or("Docker could not create the K3s data volume.")?;
     if !volume.status.success() { return Err(format!("Could not create K3s data volume: {}", output_text(&volume))); }
     let workspace_mount = format!("{workspace}:/workspace");
     let api_port = format!("{ip}:6443:6443/tcp");
@@ -1311,19 +1505,27 @@ async fn establish_compute_session(app: &AppHandle, session_id: &str, negotiatio
     let negotiations = list_negotiations().await?;
     let mut accepted = Vec::new();
     let mut provider_ids = Vec::new();
+    let mut duplicate_provider_offers = 0usize;
     for id in &negotiation_ids {
         let item = negotiations.iter().find(|n| n.get("id").and_then(Value::as_str) == Some(id.as_str())).ok_or_else(|| format!("Provider request {id} was not found on this laptop."))?;
         if item.get("state").and_then(Value::as_str) != Some("accepted") { return Err("Every selected provider must accept before the cluster starts.".into()); }
         let provider_ip = item.pointer("/provider/netbirdIp").and_then(Value::as_str).ok_or("An accepted provider has no NetBird address.")?;
         if provider_ip.parse::<std::net::IpAddr>().is_err() { return Err("An accepted provider has an invalid NetBird address. Refresh its online status and retry.".into()); }
         let provider_id = item.get("providerId").and_then(Value::as_str).ok_or("An accepted request has no provider ID.")?;
-        if provider_ids.iter().any(|existing| existing == provider_id) { return Err("Choose at most one accepted request per provider laptop. Multiple requests to one laptop cannot create separate K3s nodes.".into()); }
+        // A provider laptop is one physical K3s worker. Old app versions could
+        // create several accepted offers for the same laptop; join it once.
+        if provider_ids.iter().any(|existing| existing == provider_id) { duplicate_provider_offers += 1; continue; }
         provider_ids.push(provider_id.to_string());
         let provider = item.get("provider").cloned().ok_or("Provider connection details are missing.")?;
         if provider.get("netbirdIp").and_then(Value::as_str) != Some(provider_ip) { return Err("Provider NetBird address changed. Refresh negotiation and retry.".into()); }
         accepted.push(item.clone());
     }
-    update_session_stage(app, session_id, "connecting", stages, "validation", "completed", format!("{} accepted provider(s); consumer folder verified", accepted.len()), None);
+    let validation_detail = if duplicate_provider_offers == 0 {
+        format!("{} accepted provider(s); consumer folder verified", accepted.len())
+    } else {
+        format!("{} provider laptop(s) selected; skipped {duplicate_provider_offers} duplicate accepted offer(s) for laptops already selected; consumer folder verified", accepted.len())
+    };
+    update_session_stage(app, session_id, "connecting", stages, "validation", "completed", validation_detail, None);
 
     update_session_stage(app, session_id, "connecting", stages, "netbird", "running", "Verifying the consumer and accepted provider peer addresses", None);
     let netbird = ensure_netbird_connected("consumer").await?;
@@ -1412,6 +1614,37 @@ async fn establish_compute_session(app: &AppHandle, session_id: &str, negotiatio
     Ok(json!({"sessionId": session_id, "clusterId": SHARED_CLUSTER_ID, "serverIp": server_ip, "workspace": workspace, "providers": connected, "negotiationIds": accepted_ids, "startedAt": peer::now_iso()}))
 }
 
+async fn install_metrics_in_background(app: AppHandle, session_id: String, expected: usize, mut stages: Vec<Value>) {
+    update_session_stage(&app, &session_id, "ready", &mut stages, "metrics", "running", format!("Cluster is ready; installing Metrics Server for {expected} nodes"), None);
+    let install = tokio::task::spawn_blocking(install_metrics_server).await;
+    let install_error = match install {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some("Metrics Server installation task failed to run.".to_string()),
+    };
+    if let Some(error) = install_error {
+        update_session_stage(&app, &session_id, "ready", &mut stages, "metrics", "failed", error, None);
+        return;
+    }
+
+    let mut last_metrics = String::from("Metrics Server deployment is ready; waiting for the first CPU/RAM samples.");
+    for attempt in 0..60 {
+        match tokio::task::spawn_blocking(move || node_metrics_ready(expected)).await {
+            Ok(Ok((count, names))) => {
+                update_session_stage(&app, &session_id, "ready", &mut stages, "metrics", "completed", format!("Live CPU/RAM samples received from {count}/{expected} nodes: {}", names.join(", ")), None);
+                return;
+            }
+            Ok(Err(error)) => last_metrics = error,
+            Err(_) => last_metrics = "Metrics Server sample check could not run in the K3s container.".into(),
+        }
+        if attempt % 5 == 0 {
+            update_session_stage(&app, &session_id, "ready", &mut stages, "metrics", "running", last_metrics.clone(), None);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    update_session_stage(&app, &session_id, "ready", &mut stages, "metrics", "failed", format!("CPU/RAM samples did not arrive within 120 seconds: {last_metrics}. The cluster remains available; retry telemetry setup or inspect Metrics Server logs."), None);
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn start_compute_session(app: AppHandle, negotiation_ids: Vec<String>, consumer_workspace_path: String, output_policy: String) -> Result<Value, String> {
     if output_policy != "consumer_local_only" { return Err("ComputePool only supports consumer-local output storage.".into()); }
@@ -1426,6 +1659,7 @@ async fn start_compute_session(app: AppHandle, negotiation_ids: Vec<String>, con
         json!({"id":"server","label":"Start consumer K3s control plane","status":"pending"}),
         json!({"id":"workers","label":"Join provider worker nodes","status":"pending"}),
         json!({"id":"ready","label":"Wait for Kubernetes node readiness","status":"pending"}),
+        json!({"id":"metrics","label":"Install Metrics Server and verify CPU/RAM telemetry","status":"pending"}),
     ];
     let initial = json!({"sessionId":session_id,"clusterId":SHARED_CLUSTER_ID,"negotiationIds":negotiation_ids,"status":"connecting","stages":stages,"error":null});
     {
@@ -1438,8 +1672,15 @@ async fn start_compute_session(app: AppHandle, negotiation_ids: Vec<String>, con
     let result = establish_compute_session(&app, &session_id, negotiation_ids, consumer_workspace_path, &mut stages).await;
     match result {
         Ok(state) => {
+            let expected = state.get("providers").and_then(Value::as_array).map_or(1, |providers| providers.len() + 1);
             *ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "Session state is unavailable.")? = Some(state);
             publish_session_progress(&app, &session_id, "ready", &stages, None);
+            let metrics_app = app.clone();
+            let metrics_session_id = session_id.clone();
+            let metrics_stages = stages.clone();
+            tauri::async_runtime::spawn(async move {
+                install_metrics_in_background(metrics_app, metrics_session_id, expected, metrics_stages).await;
+            });
             Ok(json!({"sessionId": session_id, "clusterId": SHARED_CLUSTER_ID}))
         }
         Err(error) => {
@@ -1460,10 +1701,26 @@ fn parse_quantity_bytes(value: &str) -> Option<u64> {
     value.parse::<u64>().ok()
 }
 
-fn node_metric_map(cluster_id: &str) -> HashMap<String, Value> {
-    let Some(output) = cluster_output(cluster_id, &["top", "nodes", "-o", "json"]) else { return HashMap::new(); };
-    if !output.status.success() { return HashMap::new(); }
-    serde_json::from_slice::<Value>(&output.stdout).ok().and_then(|v| v.get("items").and_then(Value::as_array).cloned()).unwrap_or_default().into_iter().filter_map(|item| Some((item.pointer("/metadata/name")?.as_str()?.to_string(), item.get("usage")?.clone()))).collect()
+fn node_metric_map(cluster_id: &str) -> Result<HashMap<String, Value>, String> {
+    // `kubectl top nodes -o json` is not a supported kubectl output format on
+    // many versions. Read the Metrics API resource directly instead.
+    let output = cluster_output(cluster_id, &["get", "--raw", "/apis/metrics.k8s.io/v1beta1/nodes"])
+        .ok_or("Could not query Kubernetes Metrics Server (metrics.k8s.io). Check that the cluster is reachable and Metrics Server is installed.")?;
+    if !output.status.success() {
+        return Err(format!("Kubernetes node telemetry is unavailable: {}. Ensure Metrics Server is running in kube-system.", output_text(&output)));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| format!("Metrics Server returned invalid node data: {error}"))?;
+    Ok(value.get("items").and_then(Value::as_array).into_iter().flatten().filter_map(|item| {
+        Some((item.pointer("/metadata/name")?.as_str()?.to_string(), item.get("usage")?.clone()))
+    }).collect())
+}
+
+fn parse_cpu_cores(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(number) = value.strip_suffix('n') { return number.parse::<f32>().ok().map(|v| v / 1_000_000_000.0); }
+    if let Some(number) = value.strip_suffix('u') { return number.parse::<f32>().ok().map(|v| v / 1_000_000.0); }
+    if let Some(number) = value.strip_suffix('m') { return number.parse::<f32>().ok().map(|v| v / 1_000.0); }
+    value.parse::<f32>().ok()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1472,7 +1729,7 @@ async fn get_cluster_snapshot(cluster_id: Option<String>) -> Result<Value, Strin
     let output = cluster_output(&cluster_id, &["get", "nodes", "-o", "json"]).ok_or("Docker or kubectl is not installed.")?;
     if !output.status.success() { return Err(format!("K3s cluster is unavailable: {}", output_text(&output))); }
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|e| format!("K3s returned invalid node data: {e}"))?;
-    let metrics = node_metric_map(&cluster_id);
+    let (metrics, metrics_error) = match node_metric_map(&cluster_id) { Ok(metrics) => (metrics, None), Err(error) => (HashMap::new(), Some(error)) };
     let nodes = value.get("items").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().filter_map(|node| {
         let metadata = node.get("metadata")?;
         let name = metadata.get("name")?.as_str()?.to_string();
@@ -1485,15 +1742,15 @@ async fn get_cluster_snapshot(cluster_id: Option<String>) -> Result<Value, Strin
         let memory = capacity.get("memory").and_then(Value::as_str).and_then(parse_quantity_bytes);
         let gpu_count = allocatable.get("nvidia.com/gpu").and_then(Value::as_str).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
         let metric = metrics.get(&name);
-        let cpu_used = metric.and_then(|m| m.get("cpu")).and_then(Value::as_str).map(|s| s.trim_end_matches('m').parse::<f32>().ok().unwrap_or(0.0) / if s.ends_with('m') { 1000.0 } else { 1.0 });
+        let cpu_used = metric.and_then(|m| m.get("cpu")).and_then(Value::as_str).and_then(parse_cpu_cores);
         let memory_used = metric.and_then(|m| m.get("memory")).and_then(Value::as_str).and_then(parse_quantity_bytes);
         let cpu_percent = cpu.zip(cpu_used).map(|(total, used)| (used / total.max(1.0) * 100.0).clamp(0.0, 100.0));
         let memory_percent = memory.zip(memory_used).map(|(total, used)| (used as f32 / total.max(1) as f32 * 100.0).clamp(0.0, 100.0));
         let gpu_names = if gpu_count > 0 { vec![format!("NVIDIA GPU ×{gpu_count}")] } else { Vec::new() };
-        Some(json!({"id": name, "name": metadata.get("labels").and_then(|l| l.get("kubernetes.io/hostname")).cloned().unwrap_or(json!(name)), "role": role, "status": if ready {"ready"} else {"not_ready"}, "cpuCores": cpu, "memoryBytes": memory, "gpuNames": gpu_names, "cpuPercent": cpu_percent, "memoryPercent": memory_percent}))
+        Some(json!({"id": name, "name": metadata.get("labels").and_then(|l| l.get("kubernetes.io/hostname")).cloned().unwrap_or(json!(name)), "role": role, "status": if ready {"ready"} else {"not_ready"}, "cpuCores": cpu, "memoryBytes": memory, "cpuUsedCores": cpu_used, "memoryUsedBytes": memory_used, "gpuNames": gpu_names, "cpuPercent": cpu_percent, "memoryPercent": memory_percent}))
     }).collect::<Vec<_>>();
     let ready = !nodes.is_empty() && nodes.iter().all(|node| node.get("status").and_then(Value::as_str) == Some("ready"));
-    Ok(json!({"id": cluster_id, "status": if ready {"ready"} else if nodes.is_empty() {"disconnected"} else {"degraded"}, "capturedAt": peer::now_iso(), "nodes": nodes}))
+    Ok(json!({"id": cluster_id, "status": if ready {"ready"} else if nodes.is_empty() {"disconnected"} else {"degraded"}, "capturedAt": peer::now_iso(), "metricsAvailable": metrics_error.is_none(), "metricsError": metrics_error, "nodes": nodes}))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1636,8 +1893,55 @@ async fn list_batch_jobs(cluster_id: String) -> Result<Vec<Value>, String> {
         let total = spec["completions"].as_u64().unwrap_or(1).max(1);
         let phase = if status["failed"].as_u64().unwrap_or(0) > 0 { "failed" } else if completed >= total { "completed" } else if status["active"].as_u64().unwrap_or(0) > 0 { "running" } else { "queued" };
         let selector = spec.pointer("/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions/0/values").cloned().unwrap_or(json!([]));
-        json!({"id":name,"name":meta.pointer("/annotations/computepool.io~1display-name").and_then(Value::as_str).unwrap_or(name),"image":job.pointer("/spec/template/spec/containers/0/image").and_then(Value::as_str).unwrap_or_default(),"status":phase,"nodeIds":selector,"cpuCores":job.pointer("/spec/template/spec/containers/0/resources/requests/cpu").and_then(Value::as_str).unwrap_or("1").parse::<f32>().unwrap_or(1.0),"memoryBytes":job.pointer("/spec/template/spec/containers/0/resources/requests/memory").and_then(Value::as_str).map(|s| parse_quantity_bytes(s).unwrap_or(0)).unwrap_or(0),"gpuCount":job.pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu").and_then(Value::as_str).and_then(|v|v.parse::<u32>().ok()).unwrap_or(0),"replicas":spec["parallelism"],"createdAt":meta["creationTimestamp"],"progressPercent":(completed.saturating_mul(100)/total).min(100),"error":status.pointer("/conditions/0/message")})
+        json!({"id":name,"name":meta.pointer("/annotations/computepool.io~1display-name").and_then(Value::as_str).unwrap_or(name),"image":job.pointer("/spec/template/spec/containers/0/image").and_then(Value::as_str).unwrap_or_default(),"imagePullPolicy":job.pointer("/spec/template/spec/containers/0/imagePullPolicy"),"status":phase,"nodeIds":selector,"cpuCores":job.pointer("/spec/template/spec/containers/0/resources/requests/cpu").and_then(Value::as_str).unwrap_or("1").parse::<f32>().unwrap_or(1.0),"memoryBytes":job.pointer("/spec/template/spec/containers/0/resources/requests/memory").and_then(Value::as_str).map(|s| parse_quantity_bytes(s).unwrap_or(0)).unwrap_or(0),"gpuCount":job.pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu").and_then(Value::as_str).and_then(|v|v.parse::<u32>().ok()).unwrap_or(0),"replicas":spec["parallelism"],"createdAt":meta["creationTimestamp"],"progressPercent":(completed.saturating_mul(100)/total).min(100),"error":status.pointer("/conditions/0/message")})
     }).collect();
+    // Job state alone says whether work is queued or complete, but not why a
+    // pod is waiting or which worker received it. Read the controller pods on
+    // each live refresh so the UI can show scheduling and image-pull progress.
+    if let Some(pods_output) = server_kubectl(&["get", "pods", "--all-namespaces", "-l", "app.kubernetes.io/managed-by=computepool", "-o", "json"]) {
+        if pods_output.status.success() {
+            if let Ok(pod_data) = serde_json::from_slice::<Value>(&pods_output.stdout) {
+                let all_pods = pod_data.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+                let event_items = server_kubectl(&["get", "events", "-n", "default", "-o", "json"])
+                    .filter(|output| output.status.success())
+                    .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+                    .and_then(|data| data.get("items").and_then(Value::as_array).cloned())
+                    .unwrap_or_default();
+                for job in &mut jobs {
+                    let id = job["id"].as_str().unwrap_or_default();
+                    let matched = all_pods.iter().filter(|pod| pod.pointer("/metadata/labels/job-name").and_then(Value::as_str) == Some(id)).map(|pod| {
+                        let statuses = pod.pointer("/status/containerStatuses").and_then(Value::as_array).cloned().unwrap_or_default();
+                        let waiting = statuses.iter().find_map(|status| status.pointer("/state/waiting").filter(|value| !value.is_null()));
+                        let terminated = statuses.iter().find_map(|status| status.pointer("/state/terminated").filter(|value| !value.is_null()));
+                        let ready = pod.pointer("/status/conditions").and_then(Value::as_array).into_iter().flatten().any(|condition| condition.get("type").and_then(Value::as_str) == Some("Ready") && condition.get("status").and_then(Value::as_str) == Some("True"));
+                        let phase = pod.pointer("/status/phase").and_then(Value::as_str).unwrap_or("Unknown");
+                        let reason = waiting.and_then(|state| state.get("reason")).and_then(Value::as_str)
+                            .or_else(|| terminated.and_then(|state| state.get("reason")).and_then(Value::as_str))
+                            .or_else(|| pod.pointer("/status/reason").and_then(Value::as_str)).unwrap_or(phase);
+                        let detail = waiting.and_then(|state| state.get("message")).and_then(Value::as_str)
+                            .or_else(|| terminated.and_then(|state| state.get("message")).and_then(Value::as_str))
+                            .or_else(|| pod.pointer("/status/message").and_then(Value::as_str));
+                        let restarts = statuses.iter().filter_map(|status| status.get("restartCount").and_then(Value::as_u64)).sum::<u64>();
+                        let pod_name = pod.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default();
+                        let pod_ref = format!("pod/{pod_name}");
+                        let log_output = server_kubectl(&["logs", &pod_ref, "--all-containers=true", "--tail=60", "--timestamps=true", "-n", "default"])
+                            .filter(|output| output.status.success() && !output.stdout.is_empty())
+                            .or_else(|| if restarts > 0 { server_kubectl(&["logs", &pod_ref, "--all-containers=true", "--previous", "--tail=60", "--timestamps=true", "-n", "default"]).filter(|output| output.status.success()) } else { None });
+                        let logs = log_output.map(|output| String::from_utf8_lossy(&output.stdout).chars().rev().take(16_000).collect::<String>().chars().rev().collect::<String>());
+                        let events = event_items.iter().filter(|event| event.pointer("/involvedObject/name").and_then(Value::as_str) == Some(pod_name)).rev().take(8).map(|event| {
+                            let event_type = event.get("type").and_then(Value::as_str).unwrap_or("Normal");
+                            let event_reason = event.get("reason").and_then(Value::as_str).unwrap_or("Event");
+                            let count = event.get("count").and_then(Value::as_u64).filter(|count| *count > 1).map(|count| format!(" (x{count})")).unwrap_or_default();
+                            let message = event.get("message").and_then(Value::as_str).unwrap_or_default();
+                            format!("{event_type} · {event_reason}{count}: {message}")
+                        }).collect::<Vec<_>>();
+                        json!({"name":pod.pointer("/metadata/name").cloned().unwrap_or(Value::Null),"phase":phase,"nodeName":pod.pointer("/spec/nodeName").cloned().unwrap_or(Value::Null),"ready":ready,"reason":reason,"detail":detail,"restartCount":restarts,"logs":logs,"events":events,"imagePullPolicy":pod.pointer("/spec/containers/0/imagePullPolicy")})
+                    }).collect::<Vec<_>>();
+                    job["pods"] = json!(matched);
+                }
+            }
+        }
+    }
     let id_token = current_id_token().await.ok();
     if let Some(token) = id_token {
         for job in jobs.iter_mut().filter(|job| job["status"] == "completed") {
@@ -1710,12 +2014,18 @@ async fn submit_batch_job(cluster_id: String, spec: Value) -> Result<Value, Stri
     if command.trim().is_empty() { return Err("Enter a command or training entrypoint before launching the workload.".into()); }
     let args = vec!["sh".to_string(), "-lc".to_string(), format!("mkdir -p /workspace/jobs/{id}/output && {command}")];
     let input_dir = format!("/workspace/jobs/{id}/input"); let output_dir = format!("/workspace/jobs/{id}/output");
-    let manifest = json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":id,"namespace":"default","labels":{"app.kubernetes.io/managed-by":"computepool"},"annotations":{"computepool.io/display-name":name}},"spec":{"parallelism":replicas,"completions":replicas,"backoffLimit":0,"template":{"metadata":{"labels":{"app.kubernetes.io/managed-by":"computepool","job-name":id}},"spec":{"restartPolicy":"Never","affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":nodes}]}]}}},"containers":[{"name":"worker","image":image,"command":args,"env":[{"name":"COMPUTEPOOL_INPUT_DIR","value":input_dir},{"name":"COMPUTEPOOL_OUTPUT_DIR","value":output_dir}],"resources":{"requests":requests,"limits":requests},"volumeMounts":[{"name":"workspace","mountPath":"/workspace"}]}],"volumes":[{"name":"workspace","hostPath":{"path":"/workspace","type":"Directory"}}]}}}});
+    // Make pull behavior explicit: mutable/unpinned references are checked at
+    // every start; version tags and digests reuse a cached immutable image.
+    let image_without_digest = image.split('@').next().unwrap_or(image);
+    let last_component = image_without_digest.rsplit('/').next().unwrap_or(image_without_digest);
+    let tag = last_component.rsplit_once(':').map(|(_, tag)| tag);
+    let image_pull_policy = if tag.is_none() || tag == Some("latest") { "Always" } else { "IfNotPresent" };
+    let manifest = json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":id,"namespace":"default","labels":{"app.kubernetes.io/managed-by":"computepool"},"annotations":{"computepool.io/display-name":name}},"spec":{"parallelism":replicas,"completions":replicas,"backoffLimit":0,"template":{"metadata":{"labels":{"app.kubernetes.io/managed-by":"computepool","job-name":id}},"spec":{"restartPolicy":"Never","affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":nodes}]}]}}},"containers":[{"name":"worker","image":image,"imagePullPolicy":image_pull_policy,"command":args,"env":[{"name":"COMPUTEPOOL_INPUT_DIR","value":input_dir},{"name":"COMPUTEPOOL_OUTPUT_DIR","value":output_dir}],"resources":{"requests":requests,"limits":requests},"volumeMounts":[{"name":"workspace","mountPath":"/workspace"}]}],"volumes":[{"name":"workspace","hostPath":{"path":"/workspace","type":"Directory"}}]}}}});
     let bytes = serde_json::to_vec(&manifest).map_err(|e| format!("Could not prepare Kubernetes workload: {e}"))?;
     let output = kubectl_with_input(&["apply","-f","-"], &bytes)?;
     if !output.status.success() { return Err(format!("Kubernetes rejected the workload: {}", output_text(&output))); }
     JOB_OUTPUT_TARGETS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Output sync state is unavailable.")?.insert(id.clone(), json!({"outputFolder":spec["outputFolder"],"nodes":output_nodes,"sessionId":session_id,"workspace":workspace}));
-    let job = json!({"id":id,"name":name,"image":image,"status":"queued","nodeIds":nodes,"cpuCores":cpu,"memoryBytes":memory,"gpuCount":gpu,"replicas":replicas,"createdAt":peer::now_iso(),"progressPercent":0,"outputSync":"pending"});
+    let job = json!({"id":id,"name":name,"image":image,"imagePullPolicy":image_pull_policy,"status":"queued","nodeIds":nodes,"cpuCores":cpu,"memoryBytes":memory,"gpuCount":gpu,"replicas":replicas,"createdAt":peer::now_iso(),"progressPercent":0,"outputSync":"pending"});
     Ok(job)
 }
 
@@ -1804,12 +2114,14 @@ pub fn run() {
             send_negotiation_message_by_id,
             send_resource_proposal,
             decide_resource_proposal,
+            close_negotiation_request,
             start_resource_request,
             get_provider_status,
             set_provider_limits,
             set_provider_online,
             list_incoming_requests,
             list_provider_sessions,
+            list_provider_live_telemetry,
             decide_provider_request,
             get_provider_messages,
             send_provider_message,

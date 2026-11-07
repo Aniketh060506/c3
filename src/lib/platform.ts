@@ -16,16 +16,17 @@ export type DependencyStatus = "installed" | "on_demand" | "missing" | "outdated
 export type Dependency = { id: string; name: string; status: DependencyStatus; installedVersion?: string; requiredVersion: string; details?: string };
 export type ProviderNode = { id: string; displayName: string; online: boolean; netbirdIp?: string; cpuModel?: string; availableCores?: number; availableMemoryBytes?: number; gpuNames: string[]; price?: { amount: number; currency: string; unit: string }; latencyMs?: number };
 export type ProviderLimits = { cpuCores: number; memoryBytes: number; gpuIds: string[] };
-export type Negotiation = { id: string; providerId: string; providerSub?: string; consumerSub?: string; consumer?: string; consumerName?: string; state: "open" | "accepted" | "rejected" | "expired" | "ended"; updatedAt: string };
+export type Negotiation = { id: string; providerId: string; providerSub?: string; providerName?: string; consumerSub?: string; consumer?: string; consumerName?: string; myRole?: "consumer" | "provider"; state: "open" | "accepted" | "rejected" | "expired" | "ended"; updatedAt: string; createdAt?: string; durationMinutes?: number; requestedLimits?: ProviderLimits; workloadDescription?: string };
 export type NegotiationMessage = { id: string; sender: "consumer" | "provider"; text: string; createdAt: string; proposal?: { cpuCores: number; memoryBytes: number; gpuIds: string[]; durationMinutes: number; priceAmount: number; currency: string; state: "open" | "accepted" | "rejected" } };
-export type ClusterNode = { id: string; name: string; role: string; status: "ready" | "not_ready" | "unknown"; cpuCores?: number; memoryBytes?: number; gpuNames: string[]; cpuPercent?: number; memoryPercent?: number; gpuPercent?: number };
-export type ClusterSnapshot = { id: string; status: "connecting" | "ready" | "degraded" | "disconnected"; capturedAt: string; nodes: ClusterNode[] };
+export type ClusterNode = { id: string; name: string; role: string; status: "ready" | "not_ready" | "unknown"; cpuCores?: number | null; memoryBytes?: number | null; cpuUsedCores?: number | null; memoryUsedBytes?: number | null; gpuNames: string[]; cpuPercent?: number | null; memoryPercent?: number | null; gpuPercent?: number | null };
+export type ClusterSnapshot = { id: string; status: "connecting" | "ready" | "degraded" | "disconnected"; capturedAt: string; metricsAvailable?: boolean; metricsError?: string | null; nodes: ClusterNode[] };
 export type ConnectionStage = { id: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string };
 export type SessionSetup = { sessionId: string; clusterId: string };
 export type IncomingRequest = { id: string; consumer: string; requestedLimits: ProviderLimits; durationMinutes: number; workloadDescription?: string; createdAt: string };
-export type ProviderStatus = { online: boolean; activeSessions: number; capturedAt: string };
-export type ProviderSessionMetric = { id: string; consumer: string; state: "starting" | "active" | "stopping" | "disconnected"; startedAt: string; cpuPercent?: number; memoryBytes?: number; gpuPercent?: number; networkRxBytesPerSecond?: number; networkTxBytesPerSecond?: number };
-export type BatchJob = { id: string; name: string; image: string; status: "submitted" | "queued" | "scheduled" | "starting" | "running" | "completed" | "failed" | "cancelled"; nodeIds: string[]; cpuCores: number; memoryBytes: number; gpuCount?: number; replicas?: number; progressPercent?: number; outputSync?: "pending" | "completed" | "failed"; createdAt: string; error?: string };
+export type ProviderStatus = { online: boolean; activeSessions: number; capturedAt: string; connectionError?: string; limits?: { cpuCores?: number; memoryBytes?: number; gpuIds?: string[] } };
+export type ProviderSessionMetric = { id: string; consumer: string; state: "accepted" | "starting" | "active" | "stopping" | "disconnected"; startedAt: string; containerName?: string; telemetryAvailable?: boolean; requestedCpuCores?: number | null; requestedMemoryBytes?: number | null; requestedGpuIds?: string[]; durationMinutes?: number | null; workloadDescription?: string | null; cpuPercent?: number | null; memoryBytes?: number | null; memoryLimitBytes?: number | null; memoryPercent?: number | null; networkRxBytes?: number | null; networkTxBytes?: number | null; blockReadBytes?: number | null; blockWriteBytes?: number | null; processCount?: number | null; gpuPercent?: number | null };
+export type BatchPodStatus = { name: string; phase: string; nodeName?: string | null; ready: boolean; reason: string; detail?: string | null; restartCount: number; logs?: string | null; events?: string[]; imagePullPolicy?: string | null };
+export type BatchJob = { id: string; name: string; image: string; imagePullPolicy?: string; status: "submitted" | "queued" | "scheduled" | "starting" | "running" | "completed" | "failed" | "cancelled"; nodeIds: string[]; cpuCores: number; memoryBytes: number; gpuCount?: number; replicas?: number; progressPercent?: number; outputSync?: "pending" | "completed" | "failed"; createdAt: string; error?: string; pods?: BatchPodStatus[] };
 export type KubernetesPod = { namespace: string; name: string; phase: string; containers: string[] };
 export type NetBirdPeer = { id: string; displayName: string; netbirdIp?: string; connected: boolean; connectionType?: string };
 export type NetBirdStatus = { installed: boolean; connected: boolean; status: "connected" | "disconnected" | "starting" | "not_running" | "missing" | string; version?: string; peerIp?: string };
@@ -35,13 +36,36 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+let nativeRequestSequence = 0;
+const nativeRequests = new Map<number, string>();
+const longNativeRequests = new Set<number>();
+const nativeActivityListeners = new Set<() => void>();
+const notifyNativeActivity = () => nativeActivityListeners.forEach((listener) => listener());
+export const nativeActivity = {
+  subscribe: (listener: () => void) => { nativeActivityListeners.add(listener); return () => nativeActivityListeners.delete(listener); },
+  count: () => longNativeRequests.size,
+  label: () => {
+    const commands = [...longNativeRequests].map((id) => nativeRequests.get(id)).filter((value): value is string => Boolean(value));
+    const command = commands.at(-1);
+    const friendly: Record<string, string> = { start_compute_session: "Connecting cluster nodes", get_cluster_snapshot: "Refreshing cluster status", open_node_shell: "Opening provider shell", execute_node_shell_command: "Running provider command", create_interactive_pod: "Starting Kubernetes pod", open_pod_shell: "Opening pod shell", submit_batch_job: "Submitting batch workload", end_compute_session: "Ending compute session", get_hardware: "Refreshing machine telemetry", check_dependencies: "Checking machine readiness" };
+    return command ? (friendly[command] ?? "Waiting for ComputePool services") : "";
+  },
+};
+
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error("Open ComputePool in its Windows desktop app to access live machine and network services.");
+  const id = ++nativeRequestSequence;
+  nativeRequests.set(id, command);
+  const timer = window.setTimeout(() => { if (nativeRequests.has(id)) { longNativeRequests.add(id); notifyNativeActivity(); } }, 450);
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
     const message = typeof error === "string" ? error : error && typeof error === "object" && "message" in error && typeof error.message === "string" ? error.message : null;
     throw new Error(message ?? `Native command ${command} failed.`);
+  } finally {
+    window.clearTimeout(timer);
+    nativeRequests.delete(id);
+    if (longNativeRequests.delete(id)) notifyNativeActivity();
   }
 }
 
@@ -78,7 +102,8 @@ export const negotiationService = {
   messagesById: (negotiationId: string) => invoke<NegotiationMessage[]>("get_negotiation_messages_by_id", { negotiationId }),
   sendMessage: (providerId: string, body: string) => invoke<void>("send_negotiation_message", { providerId, body }),
   sendMessageById: (negotiationId: string, body: string) => invoke<NegotiationMessage>("send_negotiation_message_by_id", { negotiationId, body }),
-  sendProposal: (providerId: string, limits: ProviderLimits, durationMinutes: number) => invoke<NegotiationMessage>("send_resource_proposal", { providerId, limits, durationMinutes }),
+  sendProposal: (providerId: string, limits: ProviderLimits, durationMinutes: number) => invoke<Negotiation>("send_resource_proposal", { providerId, limits, durationMinutes }),
+  closeRequest: (negotiationId: string) => invoke<void>("close_negotiation_request", { negotiationId }),
   decideProposal: (messageId: string, decision: "accept" | "reject") => invoke<void>("decide_resource_proposal", { messageId, decision }),
   startRequest: (providerId: string, limits: ProviderLimits, durationMinutes: number) => invoke<Negotiation>("start_resource_request", { providerId, limits, durationMinutes }),
 };
@@ -89,6 +114,7 @@ export const providerService = {
   setOnline: (online: boolean) => invoke<ProviderStatus>("set_provider_online", { online }),
   requests: () => invoke<IncomingRequest[]>("list_incoming_requests"),
   sessions: () => invoke<ProviderSessionMetric[]>("list_provider_sessions"),
+  liveTelemetry: () => invoke<ProviderSessionMetric[]>("list_provider_live_telemetry"),
   decideRequest: (requestId: string, decision: "accept" | "reject") => invoke<void>("decide_provider_request", { requestId, decision }),
   messages: (consumerId: string) => invoke<NegotiationMessage[]>("get_provider_messages", { consumerId }),
   sendMessage: (consumerId: string, body: string) => invoke<void>("send_provider_message", { consumerId, body }),
