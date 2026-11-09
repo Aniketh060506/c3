@@ -1468,6 +1468,123 @@ fn server_kubectl(args: &[&str]) -> Option<Output> {
     docker_output(&all)
 }
 
+fn provider_kubectl_identity(session_id: &str, provider_ip: &str) -> Result<(String, String, String, String, String), String> {
+    let session = session_id.strip_prefix("cp-").unwrap_or(session_id);
+    if session.is_empty() || !session.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
+        return Err("ComputePool session ID cannot be used for Kubernetes access.".into());
+    }
+    let address = provider_ip.replace(['.', ':'], "-");
+    let suffix = format!("{session}-{address}");
+    let service_account = format!("cp-access-{suffix}");
+    let namespace_role = format!("cp-access-{suffix}");
+    let namespace_binding = format!("cp-access-{suffix}");
+    let node_role = format!("cp-nodes-{suffix}");
+    let node_binding = format!("cp-nodes-{suffix}");
+    if service_account.len() > 63 || !service_account.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
+        return Err("Provider address is too long to create a scoped Kubernetes identity.".into());
+    }
+    Ok((service_account, namespace_role, namespace_binding, node_role, node_binding))
+}
+
+fn create_provider_kubeconfig(session_id: &str, provider_ip: &str, server_ip: &str) -> Result<String, String> {
+    let (service_account, namespace_role, namespace_binding, node_role, node_binding) = provider_kubectl_identity(session_id, provider_ip)?;
+    let account = json!({
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {"name": service_account, "namespace": "default", "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/session": session_id}}
+    });
+    let role = json!({
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "Role",
+        "metadata": {"name": namespace_role, "namespace": "default", "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/session": session_id}},
+        "rules": [{"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}]
+    });
+    let namespace_binding = json!({
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": {"name": namespace_binding, "namespace": "default", "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/session": session_id}},
+        "subjects": [{"kind": "ServiceAccount", "name": service_account, "namespace": "default"}],
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": namespace_role}
+    });
+    let node_cluster_role = json!({
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "metadata": {"name": node_role, "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/session": session_id}},
+        "rules": [{"apiGroups": [""], "resources": ["nodes", "nodes/status"], "verbs": ["get", "list", "watch"]}]
+    });
+    let node_cluster_binding = json!({
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "metadata": {"name": node_binding, "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/session": session_id}},
+        "subjects": [{"kind": "ServiceAccount", "name": service_account, "namespace": "default"}],
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": node_role}
+    });
+    let manifest = serde_json::to_vec(&json!({"apiVersion":"v1", "kind":"List", "items":[account, role, namespace_binding, node_cluster_role, node_cluster_binding]}))
+        .map_err(|error| format!("Could not serialize provider Kubernetes permissions: {error}"))?;
+    let applied = kubectl_with_input(&["apply", "-f", "-"], &manifest)
+        .map_err(|error| format!("Could not create the provider's namespace-scoped Kubernetes access: {error}"))?;
+    if !applied.status.success() {
+        let _ = remove_provider_kube_identity(session_id, provider_ip);
+        return Err(format!("Could not create the provider's namespace-scoped Kubernetes access: {}", output_text(&applied)));
+    }
+
+    let token_output = match server_kubectl(&["create", "token", &service_account, "-n", "default", "--duration=24h"]) {
+        Some(output) => output,
+        None => {
+            let _ = remove_provider_kube_identity(session_id, provider_ip);
+            return Err("Could not request a short-lived provider Kubernetes token.".into());
+        }
+    };
+    if !token_output.status.success() {
+        let _ = remove_provider_kube_identity(session_id, provider_ip);
+        return Err(format!("Could not request a short-lived provider Kubernetes token: {}", output_text(&token_output)));
+    }
+    let token = String::from_utf8_lossy(&token_output.stdout).trim().to_string();
+    if token.len() < 32 || token.contains('\n') {
+        let _ = remove_provider_kube_identity(session_id, provider_ip);
+        return Err("Kubernetes returned an invalid provider token.".into());
+    }
+    let ca_output = match docker_output(&["exec", K3S_SERVER_CONTAINER, "cat", "/var/lib/rancher/k3s/server/tls/server-ca.crt"]) {
+        Some(output) => output,
+        None => {
+            let _ = remove_provider_kube_identity(session_id, provider_ip);
+            return Err("Could not reach Docker to read the K3s API certificate.".into());
+        }
+    };
+    if !ca_output.status.success() {
+        let _ = remove_provider_kube_identity(session_id, provider_ip);
+        return Err(format!("Could not read the K3s API certificate: {}", output_text(&ca_output)));
+    }
+    let ca_data = STANDARD.encode(&ca_output.stdout);
+    let token = serde_json::to_string(&token).map_err(|error| format!("Could not encode provider Kubernetes token: {error}"))?;
+    Ok(format!(
+        "apiVersion: v1\nkind: Config\nclusters:\n- name: computepool-session\n  cluster:\n    server: https://{server_ip}:6443\n    certificate-authority-data: {ca_data}\ncontexts:\n- name: computepool-session\n  context:\n    cluster: computepool-session\n    namespace: default\n    user: computepool-provider\ncurrent-context: computepool-session\nusers:\n- name: computepool-provider\n  user:\n    token: {token}\n"
+    ))
+}
+
+fn remove_provider_kube_identity(session_id: &str, provider_ip: &str) -> Result<(), String> {
+    let (service_account, namespace_role, namespace_binding, node_role, node_binding) = provider_kubectl_identity(session_id, provider_ip)?;
+    let session = session_id.strip_prefix("cp-").unwrap_or(session_id);
+    let address = provider_ip.replace(['.', ':'], "-");
+    let legacy_binding = format!("cp-view-{session}-{address}");
+    let mut errors = Vec::new();
+    for (kind, name) in [("rolebinding", namespace_binding.as_str()), ("role", namespace_role.as_str()), ("serviceaccount", service_account.as_str()), ("rolebinding", legacy_binding.as_str())] {
+        match server_kubectl(&["delete", kind, name, "-n", "default", "--ignore-not-found=true"]) {
+            Some(output) if output.status.success() => {},
+            Some(output) => errors.push(output_text(&output)),
+            None => errors.push("Could not reach the K3s API to remove provider permissions.".into()),
+        }
+    }
+    for (kind, name) in [("clusterrolebinding", node_binding.as_str()), ("clusterrole", node_role.as_str())] {
+        match server_kubectl(&["delete", kind, name, "--ignore-not-found=true"]) {
+            Some(output) if output.status.success() => {},
+            Some(output) => errors.push(output_text(&output)),
+            None => errors.push("Could not reach the K3s API to remove provider node visibility permissions.".into()),
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+}
+
 fn cluster_output(cluster_id: &str, args: &[&str]) -> Option<Output> {
     if cluster_id == SHARED_CLUSTER_ID { server_kubectl(args) }
     else {
@@ -1589,12 +1706,36 @@ async fn establish_compute_session(app: &AppHandle, session_id: &str, negotiatio
     let all_providers = accepted.iter().filter_map(|item| item.get("provider").cloned()).collect::<Vec<_>>();
     update_session_stage(app, session_id, "connecting", stages, "workers", "running", format!("Joining 0/{} provider worker nodes", all_providers.len()), None);
     let mut connected = Vec::new();
+    let mut kube_identities = Vec::<String>::new();
     for (index, item) in accepted.iter().enumerate() {
         let request_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
         let provider = item.get("provider").cloned().ok_or("Provider connection details are missing.")?;
         let provider_ip = provider.get("netbirdIp").and_then(Value::as_str).ok_or("An accepted provider has no NetBird address.")?;
         update_session_stage(app, session_id, "connecting", stages, "workers", "running", format!("Contacting provider {} ({}/{}) over NetBird", provider.get("displayName").and_then(Value::as_str).unwrap_or(provider_ip), index + 1, accepted.len()), None);
-        let request = json!({"sessionId": session_id, "consumerRequestId": request_id, "serverIp": server_ip, "serverToken": token, "providerIp": provider_ip});
+        let kube_session = session_id.to_string();
+        let kube_provider_ip = provider_ip.to_string();
+        let kube_server_ip = server_ip.clone();
+        kube_identities.push(provider_ip.to_string());
+        let kubeconfig = match tokio::task::spawn_blocking(move || create_provider_kubeconfig(&kube_session, &kube_provider_ip, &kube_server_ip)).await {
+            Ok(Ok(kubeconfig)) => kubeconfig,
+            Ok(Err(error)) => {
+                for cleanup_ip in &kube_identities { let _ = remove_provider_kube_identity(session_id, cleanup_ip); }
+                for joined_provider in &all_providers { let _ = peer::remote_service_action(joined_provider, &id_token, "cluster/leave", json!({"sessionId": session_id})).await; }
+                let _ = docker_output(&["rm", "-f", K3S_SERVER_CONTAINER]);
+                let _ = docker_output(&["volume", "rm", "cp-k3s-state"]);
+                let _ = computepool_api("DELETE", "/sessions/netbird", Some(json!({"negotiationIds": accepted_ids, "preserveAccepted": true}))).await;
+                return Err(format!("Could not prepare provider kubectl access: {error}"));
+            }
+            Err(_) => {
+                for cleanup_ip in &kube_identities { let _ = remove_provider_kube_identity(session_id, cleanup_ip); }
+                for joined_provider in &all_providers { let _ = peer::remote_service_action(joined_provider, &id_token, "cluster/leave", json!({"sessionId": session_id})).await; }
+                let _ = docker_output(&["rm", "-f", K3S_SERVER_CONTAINER]);
+                let _ = docker_output(&["volume", "rm", "cp-k3s-state"]);
+                let _ = computepool_api("DELETE", "/sessions/netbird", Some(json!({"negotiationIds": accepted_ids, "preserveAccepted": true}))).await;
+                return Err("Could not prepare provider kubectl access because the setup task failed.".into());
+            }
+        };
+        let request = json!({"sessionId": session_id, "consumerRequestId": request_id, "serverIp": server_ip, "serverToken": token, "providerIp": provider_ip, "providerKubeconfig": kubeconfig});
         let mut result = Err("Peer access policy is still propagating.".to_string());
         for attempt in 1..=8 {
             match peer::remote_request_action(&provider, &id_token, request_id, "cluster/join", request.clone()).await {
@@ -1610,6 +1751,7 @@ async fn establish_compute_session(app: &AppHandle, session_id: &str, negotiatio
         match result {
             Ok(value) => connected.push(json!({"requestId": request_id, "provider": provider, "node": value.get("nodeName").cloned().unwrap_or(Value::Null)})),
             Err(error) => {
+                for cleanup_ip in &kube_identities { let _ = remove_provider_kube_identity(session_id, cleanup_ip); }
                 for joined_provider in &all_providers { let _ = peer::remote_service_action(joined_provider, &id_token, "cluster/leave", json!({"sessionId": session_id})).await; }
                 let _ = docker_output(&["rm", "-f", K3S_SERVER_CONTAINER]);
                 let _ = docker_output(&["volume", "rm", "cp-k3s-state"]);
@@ -1638,6 +1780,7 @@ async fn establish_compute_session(app: &AppHandle, session_id: &str, negotiatio
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     if !ready {
+        for cleanup_ip in &kube_identities { let _ = remove_provider_kube_identity(session_id, cleanup_ip); }
         for provider in &all_providers { let _ = peer::remote_service_action(provider, &id_token, "cluster/leave", json!({"sessionId": session_id})).await; }
         let _ = docker_output(&["rm", "-f", K3S_SERVER_CONTAINER]);
         let _ = docker_output(&["volume", "rm", "cp-k3s-state"]);
@@ -1812,12 +1955,18 @@ async fn end_compute_session(cluster_id: String) -> Result<(), String> {
     let state = ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "Session state is unavailable.")?.clone().ok_or("No active compute session is recorded on this laptop.")?;
     let mut cleanup_errors = Vec::new();
     if let Some(providers) = state.get("providers").and_then(Value::as_array) {
+        let session_id = state.get("sessionId").and_then(Value::as_str).unwrap_or("");
         if let Ok(token) = current_id_token().await {
             for provider_session in providers {
                 let profile = provider_session.get("provider").cloned().unwrap_or(Value::Null);
                 if let Err(error) = peer::remote_service_action(&profile, &token, "cluster/leave", json!({"sessionId":state.get("sessionId").and_then(Value::as_str).unwrap_or("")})).await { cleanup_errors.push(error); }
             }
         } else { cleanup_errors.push("Could not refresh Cognito credentials to stop provider worker containers.".into()); }
+        for provider_session in providers {
+            if let Some(provider_ip) = provider_session.pointer("/provider/netbirdIp").and_then(Value::as_str) {
+                if let Err(error) = remove_provider_kube_identity(session_id, provider_ip) { cleanup_errors.push(format!("Could not remove provider kubectl access for {provider_ip}: {error}")); }
+            }
+        }
     }
     let negotiation_ids = state.get("negotiationIds").cloned().unwrap_or(json!([]));
     if let Err(error) = computepool_api("DELETE", "/sessions/netbird", Some(json!({"negotiationIds": negotiation_ids}))).await { cleanup_errors.push(format!("Could not revoke the temporary NetBird access rule: {error}")); }

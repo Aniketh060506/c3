@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Activity, ArrowDownToLine, ArrowUpFromLine, Clock3, Cpu, HardDrive, MemoryStick, Power, RefreshCw, Server, Workflow, Zap } from "lucide-react";
 import { CardHeading, LoadingPanel, PageHeader, Panel } from "@/components/kit";
 import { IconTile } from "@/components/kit";
+import { CommandSnippet } from "@/components/command-snippet";
 import { Button } from "@/components/ui/button";
 import { dependencyService, hardwareService, providerService, type Dependency, type HardwareSnapshot, type ProviderSessionMetric, type ProviderStatus } from "@/lib/platform";
 
@@ -159,6 +160,21 @@ function ProviderDashboard() {
         </Panel>
       </div>}
     </> : <TelemetryView sessions={activeSessions} updatedAt={telemetryUpdatedAt} error={telemetryError} reportedSessionCount={status?.activeSessions ?? 0} onRefresh={() => void refreshTelemetry()} />}
+    {activeSessions.length > 0 && <div className="mt-5 space-y-4">
+      {activeSessions.map((session) => {
+        const worker = session.containerName ?? `cp-agent-${session.id}`;
+        const kube = "kubectl --kubeconfig /etc/rancher/k3s/provider-kubeconfig.yaml";
+        return <Panel key={`demo-${session.id}`} className="border-emerald-200 bg-gradient-to-r from-emerald-50/70 via-white to-blue-50/70">
+          <CardHeading icon={Server} tone="green" title="Verify the shared cluster from this provider" detail={`Run these in Docker Desktop → Containers → ${worker} → Exec. This session's provider identity can manage resources in the default namespace and read cluster nodes.`} />
+          <div className="grid gap-3 md:grid-cols-2">
+            <CommandSnippet label="List cluster nodes" command={`${kube} get nodes -o wide`} />
+            <CommandSnippet label="List session pods" command={`${kube} get pods -n default -o wide`} detail="Create a pod from the consumer Pod shell first if the namespace is empty." />
+            <CommandSnippet label="Enter a pod" command={`${kube} exec -it -n default <pod-name> -- /bin/sh`} detail="Replace <pod-name> with a pod name from the previous command. Use /bin/sh for BusyBox, Python, and Ubuntu images." />
+            <CommandSnippet label="Verify inside the pod" command={'hostname && pwd && echo "ComputePool demo OK"'} detail="Run this after the pod shell opens." />
+          </div>
+        </Panel>;
+      })}
+    </div>}
   </div>;
 }
 

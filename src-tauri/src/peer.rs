@@ -17,6 +17,7 @@ use std::os::windows::process::CommandExt;
 
 const CLIENT_ID: &str = "794gej34ru6dce5b7bqhfu165e";
 const PORT: u16 = 47631;
+const PEER_PROTOCOL_VERSION: u64 = 1;
 const ISSUER: &str = "https://cognito-idp.ap-south-1.amazonaws.com/ap-south-1_xAlBWSAWs";
 const JWKS: &str = "https://cognito-idp.ap-south-1.amazonaws.com/ap-south-1_xAlBWSAWs/.well-known/jwks.json";
 
@@ -36,7 +37,7 @@ struct Identity { sub: String, name: String, id_token: String }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ClusterJoinDraft { session_id: String, consumer_request_id: String, server_ip: String, server_token: String, provider_ip: String }
+struct ClusterJoinDraft { session_id: String, consumer_request_id: String, server_ip: String, server_token: String, provider_ip: String, provider_kubeconfig: String }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +77,7 @@ pub async fn set_online(online: bool, netbird_ip: &str, profile: Value) -> Resul
             };
             let middleware_state = state.clone();
             let app = Router::new()
+                .route("/v1/status", get(peer_service_status))
                 .route("/v1/cluster/join", post(join_cluster))
                 .route("/v1/cluster/leave", post(leave_cluster))
                 .route("/v1/cluster/node/exec", post(execute_node_command))
@@ -90,6 +92,17 @@ pub async fn set_online(online: bool, netbird_ip: &str, profile: Value) -> Resul
         if let Ok(mut profile) = state.profile.lock() { profile["online"] = json!(false); }
     }
     Ok(())
+}
+
+async fn peer_service_status(State(server): State<PeerServer>) -> Result<Json<Value>, (StatusCode, String)> {
+    let profile = server.0.profile.lock()
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Provider profile is unavailable.".to_string()))?;
+    Ok(Json(json!({
+        "protocolVersion": PEER_PROTOCOL_VERSION,
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "online": profile.get("online").and_then(Value::as_bool).unwrap_or(false),
+        "peerIp": profile.get("netbirdIp").and_then(Value::as_str).unwrap_or_default(),
+    })))
 }
 
 async fn authorize(State(state): State<Arc<PeerState>>, mut request: Request<axum::body::Body>, next: Next) -> Result<Response, StatusCode> {
@@ -128,7 +141,23 @@ fn is_netbird_ip(ip: std::net::IpAddr) -> bool {
 
 #[axum::debug_handler]
 async fn join_cluster(State(server): State<PeerServer>, Extension(identity): Extension<Identity>, Json(draft): Json<ClusterJoinDraft>) -> Result<Json<Value>, (StatusCode, String)> {
-    if !valid_name(&draft.session_id) || draft.server_ip.parse::<std::net::IpAddr>().is_err() || draft.provider_ip.parse::<std::net::IpAddr>().is_err() || draft.server_token.len() < 32 || draft.server_token.len() > 1024 { return Err((StatusCode::BAD_REQUEST, "Cluster join details are invalid.".into())); }
+    let expected_api_server = format!("server: https://{}:6443", draft.server_ip);
+    let kubeconfig_is_for_server = draft.provider_kubeconfig.contains(&expected_api_server)
+        && draft.provider_kubeconfig.contains("apiVersion: v1")
+        && draft.provider_kubeconfig.contains("kind: Config")
+        && draft.provider_kubeconfig.contains("certificate-authority-data:")
+        && draft.provider_kubeconfig.contains("current-context:")
+        && draft.provider_kubeconfig.contains("token:");
+    if !valid_name(&draft.session_id)
+        || draft.server_ip.parse::<std::net::IpAddr>().is_err()
+        || draft.provider_ip.parse::<std::net::IpAddr>().is_err()
+        || draft.server_token.len() < 32
+        || draft.server_token.len() > 1024
+        || draft.provider_kubeconfig.len() > 32_768
+        || !kubeconfig_is_for_server
+    {
+        return Err((StatusCode::BAD_REQUEST, "Cluster join details are invalid: expected a valid K3s server token and kubeconfig targeting the consumer NetBird address on port 6443.".into()));
+    }
     let profile = server.0.profile.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Provider profile is unavailable.".into()))?.clone();
     if profile.get("netbirdIp").and_then(Value::as_str) != Some(draft.provider_ip.as_str()) { return Err((StatusCode::FORBIDDEN, "Provider NetBird address does not match this peer.".into())); }
     let api_base = option_env!("COMPUTEPOOL_API_URL").ok_or((StatusCode::SERVICE_UNAVAILABLE, "ComputePool AWS API is not configured in this build.".into()))?;
@@ -143,6 +172,7 @@ async fn join_cluster(State(server): State<PeerServer>, Extension(identity): Ext
     let ip = draft.provider_ip;
     let server_ip = draft.server_ip;
     let token = draft.server_token;
+    let kubeconfig = draft.provider_kubeconfig;
     let cpu_limit = profile.pointer("/limits/cpuCores").and_then(Value::as_f64).filter(|value| *value >= 1.0).ok_or((StatusCode::CONFLICT, "Provider CPU allocation is missing. Update provider limits and accept the request again.".into()))?;
     let memory_limit = profile.pointer("/limits/memoryBytes").and_then(Value::as_u64).filter(|value| *value > 0).ok_or((StatusCode::CONFLICT, "Provider memory allocation is missing. Update provider limits and accept the request again.".into()))?;
     let requested = accepted.get("requestedLimits").cloned().unwrap_or(Value::Null);
@@ -171,7 +201,7 @@ async fn join_cluster(State(server): State<PeerServer>, Extension(identity): Ext
     }
     let telemetry_gpu_ids = requested_gpu_ids.clone();
     let start_session_id = session_id.clone();
-    let worker_result = tokio::task::spawn_blocking(move || start_worker_container(&start_session_id, &ip, &server_ip, &token, requested_cpu, requested_memory, &requested_gpu_ids)).await;
+    let worker_result = tokio::task::spawn_blocking(move || start_worker_container(&start_session_id, &ip, &server_ip, &token, requested_cpu, requested_memory, &requested_gpu_ids, &kubeconfig)).await;
     let result = match worker_result {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
@@ -343,7 +373,7 @@ fn output_text(output: &Output) -> String {
     if !stderr.is_empty() { stderr } else { String::from_utf8_lossy(&output.stdout).trim().to_string() }
 }
 
-fn start_worker_container(session: &str, provider_ip: &str, server_ip: &str, token: &str, cpu_limit: f64, memory_limit: u64, gpu_ids: &[String]) -> Result<Value, String> {
+fn start_worker_container(session: &str, provider_ip: &str, server_ip: &str, token: &str, cpu_limit: f64, memory_limit: u64, gpu_ids: &[String], kubeconfig: &str) -> Result<Value, String> {
     let info = docker_output(&["info", "--format", "{{.ServerVersion}}"])?;
     if !info.status.success() { return Err("Docker Desktop is installed but its engine is not running on this provider.".into()); }
     let container = format!("cp-agent-{session}");
@@ -356,7 +386,7 @@ fn start_worker_container(session: &str, provider_ip: &str, server_ip: &str, tok
     if !vol.status.success() { return Err(format!("Could not create provider workload volume: {}", String::from_utf8_lossy(&vol.stderr))); }
     let image = "rancher/k3s:v1.31.5-k3s1";
     let mut args = vec!["run".to_string(), "-d".into(), "--name".into(), container.clone(), "--label".into(), "com.computepool.managed=true".into(), "--label".into(), "com.computepool.role=worker".into(), "--privileged".into()];
-    args.extend(["--cpus".into(), cpu_limit.to_string(), "--memory".into(), format!("{memory_limit}b"), "--memory-swap".into(), format!("{memory_limit}b"), "--publish".into(), format!("{provider_ip}:8472:8472/udp"), "--publish".into(), format!("{provider_ip}:10250:10250/tcp"), "--volume".into(), format!("{volume}:/workspace"), "--env".into(), format!("K3S_URL=https://{server_ip}:6443"), "--env".into(), format!("K3S_TOKEN={token}"), "--env".into(), format!("K3S_NODE_NAME={name}"), image.into(), "agent".into(), "--node-ip".into(), provider_ip.into(), "--node-external-ip".into(), provider_ip.into()]);
+    args.extend(["--cpus".into(), cpu_limit.to_string(), "--memory".into(), format!("{memory_limit}b"), "--memory-swap".into(), format!("{memory_limit}b"), "--publish".into(), format!("{provider_ip}:8472:8472/udp"), "--publish".into(), format!("{provider_ip}:10250:10250/tcp"), "--volume".into(), format!("{volume}:/workspace"), "--env".into(), format!("K3S_URL=https://{server_ip}:6443"), "--env".into(), format!("K3S_TOKEN={token}"), "--env".into(), format!("K3S_NODE_NAME={name}"), "--env".into(), "KUBECONFIG=/etc/rancher/k3s/provider-kubeconfig.yaml".into(), image.into(), "agent".into(), "--node-ip".into(), provider_ip.into(), "--node-external-ip".into(), provider_ip.into()]);
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     match docker_output(&refs) {
         Ok(output) if output.status.success() => output,
@@ -372,7 +402,16 @@ fn start_worker_container(session: &str, provider_ip: &str, server_ip: &str, tok
             return Err(error);
         }
     };
-    Ok(json!({"nodeName": name, "container": container, "state": "starting"}))
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, kubeconfig.as_bytes());
+    let install = format!("mkdir -p /etc/rancher/k3s && printf '%s' '{encoded}' | base64 -d > /etc/rancher/k3s/provider-kubeconfig.yaml && chmod 600 /etc/rancher/k3s/provider-kubeconfig.yaml");
+    let configured = docker_output(&["exec", &container, "sh", "-lc", &install])?;
+    if !configured.status.success() {
+        let message = output_text(&configured);
+        let _ = docker_output(&["rm", "-f", &container]);
+        let _ = docker_output(&["volume", "rm", &volume]);
+        return Err(format!("The provider worker joined, but its kubectl context could not be installed: {message}"));
+    }
+    Ok(json!({"nodeName": name, "container": container, "state": "starting", "kubectlContext": "computepool-session"}))
 }
 
 fn stop_worker_container(session: &str) -> Result<Value, String> {
@@ -389,21 +428,47 @@ pub async fn remote_request_action(provider: &Value, id_token: &str, request_id:
     let _ = request_id;
     let path = if endpoint == "cluster/join" { "/v1/cluster/join" } else { return Err("Unsupported provider peer action.".into()); };
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build().map_err(|e| format!("Could not configure provider connection: {e}"))?;
+    let status_response = client.get(format!("http://{ip}:{PORT}/v1/status")).bearer_auth(id_token).send().await
+        .map_err(|e| format!("Could not contact provider peer service at {ip}:{PORT}: {e}. Confirm the provider is online, both laptops are connected to the ComputePool NetBird network, and TCP {PORT} is allowed between them."))?;
+    let peer_status = decode_peer_response(status_response, ip, "peer-service compatibility check").await?;
+    if peer_status.get("protocolVersion").and_then(Value::as_u64) != Some(PEER_PROTOCOL_VERSION) {
+        let found = peer_status.get("protocolVersion").and_then(Value::as_u64).map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+        return Err(format!("Provider {ip} is running an incompatible ComputePool peer protocol (provider {found}, this app {PEER_PROTOCOL_VERSION}). Update ComputePool on both laptops, keep Provider → Share this laptop online, then retry the accepted session."));
+    }
+    if peer_status.get("online").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("Provider peer service at {ip} is not online. On the provider laptop, open ComputePool → Provider → Share this laptop and turn sharing on, then retry."));
+    }
+    if peer_status.get("peerIp").and_then(Value::as_str) != Some(ip) {
+        return Err(format!("Provider peer address mismatch: the directory lists {ip}, but the provider service reports {}. Refresh the provider directory and retry.", peer_status.get("peerIp").and_then(Value::as_str).unwrap_or("no address")));
+    }
     let response = client.post(format!("http://{ip}:{PORT}{path}")).bearer_auth(id_token).json(&body).send().await.map_err(|e| format!("Could not contact provider peer at {ip}:{PORT}: {e}"))?;
-    let status = response.status();
-    let body = response.json::<Value>().await.map_err(|e| format!("Provider returned invalid response: {e}"))?;
-    if !status.is_success() { return Err(format!("Provider rejected the request (HTTP {status}): {body}")); }
-    Ok(body)
+    decode_peer_response(response, ip, "cluster worker join").await
 }
 
 pub async fn remote_service_action(provider: &Value, id_token: &str, endpoint: &str, body: Value) -> Result<Value, String> {
     let ip = provider.get("netbirdIp").and_then(Value::as_str).ok_or("Provider has no NetBird address.")?;
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build().map_err(|e| format!("Could not configure provider connection: {e}"))?;
     let response = client.post(format!("http://{ip}:{PORT}/v1/{endpoint}")).bearer_auth(id_token).json(&body).send().await.map_err(|e| format!("Could not contact provider peer at {ip}:{PORT}: {e}"))?;
+    decode_peer_response(response, ip, endpoint).await
+}
+
+async fn decode_peer_response(response: reqwest::Response, ip: &str, action: &str) -> Result<Value, String> {
     let status = response.status();
-    let body = response.json::<Value>().await.map_err(|e| format!("Provider returned invalid response: {e}"))?;
-    if !status.is_success() { return Err(format!("Provider rejected the request (HTTP {status}): {body}")); }
-    Ok(body)
+    let body = response.text().await.map_err(|error| format!("Could not read provider {action} response from {ip}: {error}"))?;
+    if !status.is_success() {
+        let detail = serde_json::from_str::<Value>(&body).ok()
+            .and_then(|value| value.get("message").or_else(|| value.get("error")).and_then(Value::as_str).map(ToOwned::to_owned))
+            .unwrap_or_else(|| body.trim().chars().take(360).collect::<String>());
+        let detail = if detail.is_empty() { "The provider returned an empty error response.".into() } else { detail };
+        return Err(match status {
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::UNPROCESSABLE_ENTITY => format!("Provider {ip} returned HTTP {status} for {action}: {detail} This usually means the provider app is an older or incompatible build. Install the same current ComputePool build on both laptops, then retry."),
+            StatusCode::UNAUTHORIZED => format!("Provider {ip} rejected ComputePool authentication for {action} (HTTP {status}): {detail} Sign out and back in to ComputePool on both laptops, then retry."),
+            StatusCode::FORBIDDEN => format!("Provider {ip} denied {action} (HTTP {status}): {detail} Confirm the accepted request belongs to this consumer and that the temporary NetBird session policy is active."),
+            StatusCode::SERVICE_UNAVAILABLE => format!("Provider {ip} is not serving peer requests (HTTP {status}): {detail} Keep Provider → Share this laptop online and retry."),
+            _ => format!("Provider {ip} returned HTTP {status} for {action}: {detail}"),
+        });
+    }
+    serde_json::from_str::<Value>(&body).map_err(|_| format!("Provider {ip} returned HTTP {status} for {action}, but the response was not valid ComputePool JSON. Confirm both laptops are running the same current app build and retry."))
 }
 
 pub fn local_profile() -> Value { LOCAL_PROFILE.get_or_init(|| Mutex::new(Value::Null)).lock().map(|v| v.clone()).unwrap_or(Value::Null) }
