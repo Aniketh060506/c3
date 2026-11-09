@@ -611,6 +611,39 @@ fn netbird_binary() -> Result<String, String> {
     netbird_cli_candidates().into_iter().find(|candidate| command_output(candidate, &["version"]).is_some_and(|output| output.status.success())).ok_or_else(|| "NetBird CLI is not installed.".into())
 }
 
+const COMPUTEPOOL_NETBIRD_PROFILE: &str = "computepool";
+
+fn ensure_computepool_netbird_profile(program: &str) -> Result<(), String> {
+    let list = command_output(program, &["profile", "list", "--show-id"])
+        .filter(|output| output.status.success())
+        .ok_or_else(|| "This NetBird client does not support separate profiles. Update NetBird, then retry; ComputePool keeps your existing NetBird identity untouched.".to_string())?;
+    let listing = output_text(&list);
+    let profile_line = listing.lines().find(|line| {
+        line.split_whitespace().any(|part| part.eq_ignore_ascii_case(COMPUTEPOOL_NETBIRD_PROFILE))
+    });
+
+    if let Some(line) = profile_line {
+        let active = line.contains('✓') || line.split_whitespace().last().is_some_and(|part| part == "*");
+        if !active {
+            let selected = command_output(program, &["profile", "select", COMPUTEPOOL_NETBIRD_PROFILE]);
+            if !selected.as_ref().is_some_and(|output| output.status.success()) {
+                return Err(format!("Could not select ComputePool's NetBird profile: {}", selected.as_ref().map(output_text).unwrap_or_else(|| "NetBird CLI could not start.".into())));
+            }
+        }
+        return Ok(());
+    }
+
+    let added = command_output(program, &["profile", "add", COMPUTEPOOL_NETBIRD_PROFILE]);
+    if !added.as_ref().is_some_and(|output| output.status.success()) {
+        return Err(format!("Could not create ComputePool's separate NetBird profile: {}", added.as_ref().map(output_text).unwrap_or_else(|| "NetBird CLI could not start.".into())));
+    }
+    let selected = command_output(program, &["profile", "select", COMPUTEPOOL_NETBIRD_PROFILE]);
+    if !selected.as_ref().is_some_and(|output| output.status.success()) {
+        return Err(format!("Could not activate ComputePool's separate NetBird profile: {}", selected.as_ref().map(output_text).unwrap_or_else(|| "NetBird CLI could not start.".into())));
+    }
+    Ok(())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn open_node_shell(cluster_id: String, node_id: String) -> Result<Value, String> {
     let active = ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "Session state is unavailable.")?.clone().ok_or("Start a shared ComputePool session before opening a provider shell.")?;
@@ -964,35 +997,36 @@ fn provider_node_id(owner_sub: &str) -> String {
 }
 
 async fn ensure_netbird_connected(role: &str) -> Result<Value, String> {
-    let mut status = get_netbird_status().await?;
-    if status.get("installed").and_then(Value::as_bool) != Some(true) {
+    let initial_status = get_netbird_status().await?;
+    if initial_status.get("installed").and_then(Value::as_bool) != Some(true) {
         return Err("Install the NetBird Windows client first. After installation, ComputePool will enroll this laptop automatically; no separate NetBird account sign-in is needed.".into());
     }
+    let program = netbird_binary()?;
+    ensure_computepool_netbird_profile(&program)?;
+    let status = get_netbird_status().await?;
     if status.get("connected").and_then(Value::as_bool) == Some(true) {
         let ip = status.get("peerIp").and_then(Value::as_str).unwrap_or_default();
         let verification = computepool_api("POST", "/netbird/verify-peer", Some(json!({"ip": ip}))).await?;
         if verification.get("enrolled").and_then(Value::as_bool) == Some(true) { return Ok(status); }
-        let program = netbird_binary()?;
-        let down = hidden_command(&program).args(["down"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("Could not switch this laptop to the ComputePool NetBird network: {e}"))?;
-        if !down.status.success() { return Err(format!("This laptop is connected to a different NetBird network, and ComputePool could not switch it automatically: {}. Disconnect that NetBird profile once, then retry.", output_text(&down))); }
-        status["connected"] = json!(false);
+        return Err(format!("ComputePool's NetBird profile is connected as {}, but that peer is not registered in the workspace configured for ComputePool. Check that the backend NETBIRD_MANAGEMENT_TOKEN belongs to the NetBird team shown in your dashboard. Your other NetBird profile was left unchanged.", ip));
     }
     let enrollment = computepool_api("POST", "/netbird/setup-key", Some(json!({"role": if role == "provider" {"provider"} else {"consumer"}}))).await?;
     let setup_key = enrollment.get("setupKey").and_then(Value::as_str).ok_or("ComputePool did not receive a NetBird enrollment key.")?;
-    let program = netbird_binary()?;
-    let output = hidden_command(&program).args(["up", "--setup-key", setup_key]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("Could not enroll this laptop in the ComputePool NetBird network: {e}"))?;
-    if !output.status.success() { return Err(format!("NetBird enrollment failed: {}. If this laptop is already signed into another NetBird network, disconnect that profile first, then retry from ComputePool.", output_text(&output))); }
-    for _ in 0..30 {
+    let output = hidden_command(&program).args(["up", "--setup-key", setup_key, "--profile", COMPUTEPOOL_NETBIRD_PROFILE]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("Could not enroll this laptop in the ComputePool NetBird network: {e}"))?;
+    if !output.status.success() { return Err(format!("NetBird enrollment failed for ComputePool's separate profile: {}. The existing NetBird profile was not changed.", output_text(&output))); }
+    for _ in 0..45 {
         let status = get_netbird_status().await?;
         if status.get("connected").and_then(Value::as_bool) == Some(true) {
-            let peer_ip = status.get("peerIp").and_then(Value::as_str).ok_or("NetBird connected but did not assign a usable peer IP.")?;
+            let Some(peer_ip) = status.get("peerIp").and_then(Value::as_str) else {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            };
             let verification = computepool_api("POST", "/netbird/verify-peer", Some(json!({"ip": peer_ip}))).await?;
             if verification.get("enrolled").and_then(Value::as_bool) == Some(true) { return Ok(status); }
-            return Err("NetBird reports connected, but the peer is not registered in the ComputePool network. Retry enrollment from this screen.".into());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    Err("NetBird enrollment started but the client did not become connected within 30 seconds. Refresh status and retry.".into())
+    Err("ComputePool's NetBird profile did not appear as a connected peer in the configured workspace within 45 seconds. Check that setup-key peer approval is disabled and that the backend NETBIRD_MANAGEMENT_TOKEN belongs to the intended workspace, then retry.".into())
 }
 
 fn current_identity_claims() -> Result<Value, String> {

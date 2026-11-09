@@ -75,7 +75,7 @@ function DistributedWorkloads() {
     { icon: Zap, value: `${gpu * replicas}`, label: "GPU devices", tone: "orange" },
   ] as const;
 
-  return <div className="mx-auto max-w-7xl">
+  return <div className="w-full min-w-0">
     <Link to="/cluster" search={{ clusterId }} className="mb-4 inline-flex text-sm font-semibold text-muted-foreground">← Session dashboard</Link>
     <PageHeader eyebrow="Kubernetes · distributed processing" title="Distributed workload"><Link to="/terminal" search={{ clusterId }} className="inline-flex items-center rounded-xl border border-border px-3 py-2 text-xs font-semibold"><Cpu className="mr-2 size-4" />Interactive pod shell</Link><Button variant="outline" className="rounded-xl" onClick={() => void refresh()} disabled={!clusterId || refreshing}><RefreshCw className={`mr-2 size-4 ${refreshing ? "animate-spin" : ""}`} />{refreshing ? "Refreshing…" : "Refresh live jobs"}</Button></PageHeader>
     {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}

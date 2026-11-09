@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { Activity, ArrowDownToLine, ArrowUpFromLine, Clock3, Cpu, HardDrive, MemoryStick, Power, RefreshCw, Server, Workflow, Zap } from "lucide-react";
-import { CardHeading, PageHeader, Panel } from "@/components/kit";
+import { CardHeading, LoadingPanel, PageHeader, Panel } from "@/components/kit";
 import { IconTile } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { dependencyService, hardwareService, providerService, type Dependency, type HardwareSnapshot, type ProviderSessionMetric, type ProviderStatus } from "@/lib/platform";
@@ -21,6 +21,7 @@ function ProviderDashboard() {
   const [telemetryUpdatedAt, setTelemetryUpdatedAt] = useState<string | null>(null);
   const [telemetryError, setTelemetryError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
   const limitsHydrated = useRef(false);
   const statusVersion = useRef(0);
   const actionInProgress = useRef(false);
@@ -53,6 +54,7 @@ function ProviderDashboard() {
       const detail = failed.reason instanceof Error ? failed.reason.message : "Provider service unavailable.";
       setError(`${labels[failedIndex]} failed: ${detail}`);
     } else setError(null);
+    setInitialLoading(false);
   };
 
   useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 20000); return () => window.clearInterval(timer); }, []);
@@ -122,11 +124,12 @@ function ProviderDashboard() {
   };
 
   const memoryGb = hardware ? Math.floor(hardware.memory.availableBytes / 1024 ** 3) : 0;
-  return <div className="mx-auto max-w-7xl">
+  return <div className="w-full min-w-0">
     <PageHeader eyebrow="Provider · local machine" title="Share this laptop">
       <Button variant="outline" className="rounded-xl" onClick={() => void refresh()}><RefreshCw className="mr-2 size-4" />Refresh live status</Button>
     </PageHeader>
     {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}
+    {initialLoading && <LoadingPanel label="Loading provider capacity, hardware, and service status" className="mb-4 min-h-40" />}
     {status?.connectionError && <Panel className="mb-4 border-warning/40 bg-warning-soft/30 text-sm text-muted-foreground">{status.connectionError}</Panel>}
     <Panel className={`mb-5 ${status?.online ? "border-success/40 bg-success-soft/50" : ""}`}>
       <div className="flex flex-wrap items-center gap-4"><IconTile icon={Power} tone={status?.online ? "green" : "slate"} size="lg" className={status?.online ? "animate-pulse" : ""} />

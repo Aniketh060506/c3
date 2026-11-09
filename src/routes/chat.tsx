@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { Cpu, FolderOpen, Laptop, LoaderCircle, MemoryStick, RefreshCw, Send, ShieldCheck, Timer } from "lucide-react";
-import { PageHeader, Panel } from "@/components/kit";
+import { LoadingPanel, PageHeader, Panel } from "@/components/kit";
 import { IconTile } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { clusterService, fileService, marketplaceService, negotiationService, type Negotiation, type NegotiationMessage, type ProviderNode } from "@/lib/platform";
@@ -26,6 +26,7 @@ function NegotiationChat() {
   const [sessionId, setSessionId] = useState<string | null>(() => readSessionValue("computepool-active-session"));
   const [connection, setConnection] = useState<{ status: "connecting" | "ready" | "failed"; stages: { id: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string }[]; error?: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const acceptedRequests = negotiations.filter((n) => n.state === "accepted").sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   // A physical provider laptop can only join a K3s cluster once. When older
@@ -37,6 +38,7 @@ function NegotiationChat() {
   const currentRequestState = currentRequest?.state;
   const canCreateProposal = !currentRequestState || ["rejected", "expired", "ended"].includes(currentRequestState);
   const load = async () => {
+    setInitialLoading(true);
     setError(null);
     const results = await Promise.allSettled([selectedProviderId ? marketplaceService.get(selectedProviderId) : Promise.resolve(null), negotiationService.list()]);
     if (results[0].status === "fulfilled" && results[0].value) setProvider(results[0].value);
@@ -59,6 +61,7 @@ function NegotiationChat() {
     }
     const failed = results.find((r) => r.status === "rejected");
     if (failed?.status === "rejected") setError(failed.reason instanceof Error ? failed.reason.message : "Negotiation service unavailable.");
+    setInitialLoading(false);
   };
   useEffect(() => { void load(); }, [selectedProviderId, selectedNegotiationId]);
   useEffect(() => {
@@ -144,9 +147,9 @@ function NegotiationChat() {
     return () => { active = false; window.clearInterval(timer); };
   }, [sessionId, navigate]);
 
-  return <div className="mx-auto max-w-7xl"><PageHeader eyebrow="Consumer · step 2" title="Chat & agree first"><Button variant="outline" className="rounded-xl" onClick={() => void load()} disabled={busy}><RefreshCw className="mr-2 size-4" />Refresh conversation</Button></PageHeader>
+  return <div className="w-full min-w-0"><PageHeader eyebrow="Consumer · step 2" title="Chat & agree first"><Button variant="outline" className="rounded-xl" onClick={() => void load()} disabled={busy}><RefreshCw className="mr-2 size-4" />Refresh conversation</Button></PageHeader>
     {accountConversations.length > 0 && <Panel className="mb-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h2 className="font-bold">Your conversation history</h2><p className="mt-1 text-xs text-muted-foreground">Every provider request from this account, including closed conversations.</p></div><span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold">{accountConversations.length} total</span></div><div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{accountConversations.map((item) => <Link key={item.id} to="/chat" search={{ providerId: item.providerId, negotiationId: item.id }} className={`rounded-xl border p-3 transition hover:border-primary/40 hover:bg-primary/5 ${item.id === conversationId ? "border-primary bg-primary/5" : "border-border bg-white"}`}><div className="flex items-start justify-between gap-2"><p className="truncate text-sm font-semibold">{item.providerName ?? item.providerId}</p><span className="rounded-full bg-muted px-2 py-0.5 text-[10px] capitalize text-muted-foreground">{item.state}</span></div><p className="mt-1 text-[11px] text-muted-foreground">{new Date(item.updatedAt ?? item.createdAt ?? "").toLocaleString()}</p><p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{item.id}</p></Link>)}</div></Panel>}
-    {!selectedProviderId ? <Panel className="py-10 text-center"><IconTile icon={Laptop} tone="blue" size="lg" className="mx-auto" /><h2 className="mt-4 text-xl font-bold">{accountConversations.length ? "Choose a conversation above" : "Choose a provider to begin"}</h2><p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">{accountConversations.length ? "Your prior chats stay available above, with all messages and request details." : "Open a live provider from the marketplace. The terminal appears only after the provider accepts and a session is connected."}</p><Link to="/marketplace" className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Find providers</Link></Panel> : <>
+    {initialLoading ? <LoadingPanel label="Loading conversation, account history, and provider status" /> : !selectedProviderId ? <Panel className="py-10 text-center"><IconTile icon={Laptop} tone="blue" size="lg" className="mx-auto" /><h2 className="mt-4 text-xl font-bold">{accountConversations.length ? "Choose a conversation above" : "Choose a provider to begin"}</h2><p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">{accountConversations.length ? "Your prior chats stay available above, with all messages and request details." : "Open a live provider from the marketplace. The terminal appears only after the provider accepts and a session is connected."}</p><Link to="/marketplace" className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Find providers</Link></Panel> : <>
       {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}
       <Panel className="mb-4"><div className="flex items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><IconTile icon={Laptop} tone={provider?.online ? "green" : "slate"} size="md" /><div className="min-w-0"><p className="text-xs font-semibold uppercase tracking-widest text-primary">Selected provider</p><h2 className="mt-1 truncate text-xl font-bold">{provider?.displayName ?? "Loading live provider…"}</h2></div></div><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${provider?.online ? "bg-success-soft text-success" : "bg-muted text-muted-foreground"}`}>{provider ? provider.online ? "Online" : "Offline" : "Status unavailable"}</span></div></Panel>
       <div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">

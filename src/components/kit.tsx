@@ -1,7 +1,7 @@
 import { motion, useMotionValue, useSpring, useTransform, animate } from "motion/react";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
-import { Cpu, type LucideIcon } from "lucide-react";
+import { Cpu, LoaderCircle, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function Panel({ className, children, delay = 0 }: { className?: string; children: ReactNode; delay?: number }) {
@@ -60,6 +60,21 @@ export function IconTile({ icon: Icon, tone = "blue", size = "md", className }: 
 /** Consistent, icon-led card title that gives dense screens clearer landmarks. */
 export function CardHeading({ icon: Icon, tone = "blue", title, detail, className }: { icon: LucideIcon; tone?: keyof typeof iconTone; title: ReactNode; detail?: ReactNode; className?: string }) {
   return <div className={cn("mb-4 flex items-center gap-3", className)}><IconTile icon={Icon} tone={tone} size="md" /><div className="min-w-0"><h2 className="text-lg font-bold leading-tight">{title}</h2>{detail && <p className="mt-1 text-sm text-muted-foreground">{detail}</p>}</div></div>;
+}
+
+/** Shared first-load state for tabs that wait on live desktop or AWS data. */
+export function LoadingPanel({ label, className }: { label: string; className?: string }) {
+  return <div role="status" aria-live="polite"><Panel className={cn("grid min-h-56 place-items-center overflow-hidden", className)}>
+    <div className="w-full max-w-md px-4 text-center">
+      <span className="mx-auto grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><LoaderCircle className="size-6 animate-spin" /></span>
+      <p className="mt-4 font-semibold">{label}</p>
+      <p className="mt-1 text-sm text-muted-foreground">Getting the latest live data…</p>
+      <div aria-hidden="true" className="mt-5 space-y-2.5">
+        <span className="mx-auto block h-2 w-4/5 animate-pulse rounded-full bg-muted" />
+        <span className="mx-auto block h-2 w-3/5 animate-pulse rounded-full bg-muted" />
+      </div>
+    </div>
+  </Panel></div>;
 }
 
 /** Number that springs to its new value. */

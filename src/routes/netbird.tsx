@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { LoaderCircle, Network, RefreshCw, ShieldCheck, Wifi, WifiOff } from "lucide-react";
-import { PageHeader, Panel } from "@/components/kit";
+import { LoadingPanel, PageHeader, Panel } from "@/components/kit";
 import { IconTile } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { netbirdService, type NetBirdPeer, type NetBirdStatus } from "@/lib/platform";
@@ -13,14 +13,17 @@ function NetBirdSetup() {
   const [peers, setPeers] = useState<NetBirdPeer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const refresh = async () => {
+    if (status === null && peers === null) setLoading(true);
     setError(null);
     const [state, list] = await Promise.allSettled([netbirdService.status(), netbirdService.peers()]);
     if (state.status === "fulfilled") setStatus(state.value); else setStatus(null);
     if (list.status === "fulfilled") setPeers(list.value); else setPeers(null);
     const rejected = [state, list].find((item) => item.status === "rejected");
     if (rejected?.status === "rejected") setError(rejected.reason instanceof Error ? rejected.reason.message : "Could not read the NetBird client status.");
+    setLoading(false);
   };
   useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 5000); return () => window.clearInterval(timer); }, []);
 
@@ -31,18 +34,18 @@ function NetBirdSetup() {
     finally { setConnecting(false); }
   };
 
-  return <div className="mx-auto max-w-5xl">
+  return <div className="w-full min-w-0">
     <PageHeader eyebrow="Private peer network · automatic enrollment" title="ComputePool network">
       <Button variant="outline" className="rounded-xl" onClick={() => void refresh()}><RefreshCw className="mr-2 size-4" />Refresh live status</Button>
     </PageHeader>
-    <Panel className={`mb-5 ${status?.connected ? "border-success/40 bg-success-soft/40" : ""}`}>
+    {loading && status === null && peers === null ? <LoadingPanel label="Checking NetBird connection and visible peers" className="mb-5" /> : <Panel className={`mb-5 ${status?.connected ? "border-success/40 bg-success-soft/40" : ""}`}>
       <div className="flex flex-wrap items-center gap-4">
         <IconTile icon={status?.connected ? Wifi : WifiOff} tone={status?.connected ? "green" : "slate"} size="md" />
         <div className="min-w-56 flex-1"><p className="font-bold">{status?.connected ? "This laptop is enrolled and connected" : status?.installed ? "NetBird is installed; enrollment is ready" : "NetBird client is required"}</p><p className="mt-1 text-sm text-muted-foreground">{status?.peerIp ? `Private IP ${status.peerIp}` : "Status refreshes automatically every 5 seconds."}{status?.version ? ` · Client ${status.version}` : ""}</p></div>
         {!status?.connected && <Button className="rounded-xl" onClick={() => void connect()} disabled={connecting || !status?.installed}>{connecting ? <LoaderCircle className="mr-2 size-4 animate-spin" /> : <Network className="mr-2 size-4" />}{connecting ? "Enrolling this laptop…" : "Connect through ComputePool"}</Button>}
       </div>
       {error && <p role="status" className="mt-4 rounded-xl border border-warning/40 bg-warning-soft p-3 text-sm text-muted-foreground">{error}</p>}
-    </Panel>
+    </Panel>}
 
     <div className="grid gap-4 lg:grid-cols-2">
       <Panel><div className="flex items-center gap-3"><IconTile icon={Network} tone="blue" size="md" /><h2 className="font-bold">One-time setup for each laptop</h2></div><ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-muted-foreground"><li>Install the NetBird Windows client. ComputePool detects the local service.</li><li>Sign in to ComputePool with your Cognito email and password.</li><li>Click <strong>Connect through ComputePool</strong>, or enable provider sharing. ComputePool requests a one-use enrollment key from its AWS service and enrolls this laptop automatically.</li><li>Keep the NetBird service running while sharing or using compute. You do not create NetBird accounts, invite users, or sign in to NetBird for each negotiation.</li></ol><p className="mt-4 text-xs text-muted-foreground">If this laptop is connected to another NetBird network, ComputePool switches it to its managed network when you connect. That disconnects the other NetBird profile on this laptop.</p><a className="mt-3 inline-flex font-semibold text-primary" href="https://docs.netbird.io/get-started/install/windows" target="_blank" rel="noreferrer">NetBird Windows install guide</a></Panel>

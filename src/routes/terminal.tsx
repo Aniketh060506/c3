@@ -72,7 +72,7 @@ function InteractivePod() {
   };
   const run = (e?: React.FormEvent) => { e?.preventDefault(); void execute(input.trim()); };
 
-  return <div className="mx-auto max-w-7xl">
+  return <div className="w-full min-w-0">
     <Link to="/cluster" search={{ clusterId }} className="mb-4 inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground"><ArrowLeft className="size-4" />Session dashboard</Link>
     <PageHeader eyebrow="Interactive compute · Kubernetes pod" title="Pod shell"><Link to="/batch-jobs" search={{ clusterId }} className="inline-flex items-center rounded-xl border border-border px-3 py-2 text-xs font-semibold"><Boxes className="mr-2 size-4" />Distributed workload</Link></PageHeader>
     <div className="grid items-start gap-4 xl:grid-cols-[minmax(320px,390px)_minmax(0,1fr)]">

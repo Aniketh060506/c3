@@ -1,0 +1,2 @@
+[env]
+COMPUTEPOOL_API_URL = { value = "https://6ysr9qz5a9.execute-api.ap-south-1.amazonaws.com", force = false }

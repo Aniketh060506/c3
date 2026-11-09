@@ -1,8 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, Boxes, Check, CircleAlert, Cpu, HardDrive, MemoryStick, MessageCircle, Monitor, Network, RefreshCw, ShieldCheck, Store, Zap } from "lucide-react";
 import { motion } from "motion/react";
-import { CardHeading, IconTile, PageHeader, Panel } from "@/components/kit";
+import { CardHeading, IconTile, LoadingPanel, PageHeader, Panel } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { dependencyService, hardwareService, isTauri, type Dependency, type HardwareSnapshot } from "@/lib/platform";
 
@@ -17,12 +17,17 @@ function Overview() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [updated, setUpdated] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const diagnosticsLoaded = useRef(false);
 
   const refresh = useCallback(async () => {
+    if (!diagnosticsLoaded.current) setLoading(true);
     setError(null);
     if (!isTauri()) {
       setHardware(null); setDeps(null);
       setError("Live hardware and dependency checks are available in the Windows desktop app.");
+      diagnosticsLoaded.current = true;
+      setLoading(false);
       return;
     }
     const [hw, checks] = await Promise.allSettled([hardwareService.get(), dependencyService.list()]);
@@ -34,6 +39,8 @@ function Overview() {
       const reason = hw.status === "rejected" ? hw.reason : checks.status === "rejected" ? checks.reason : null;
       setError(reason instanceof Error ? reason.message : "The desktop diagnostics service is unavailable.");
     }
+    diagnosticsLoaded.current = true;
+    setLoading(false);
   }, []);
 
   useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 5000); return () => window.clearInterval(timer); }, [refresh]);
@@ -58,11 +65,12 @@ function Overview() {
   const storage = hardware?.storage[0];
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="w-full min-w-0">
       <PageHeader eyebrow="ComputePool · Windows desktop" title="Your machine, ready for the pool">
         <Link to="/netbird" className="inline-flex items-center rounded-xl border border-border bg-card px-4 py-2 text-sm font-semibold hover:bg-muted"><Network className="mr-2 size-4" />NetBird setup</Link>
         <Button variant="outline" className="rounded-xl" onClick={() => void refresh()}><RefreshCw className="mr-2 size-4" />Refresh diagnostics</Button>
       </PageHeader>
+      {loading && !hardware && !deps && <LoadingPanel label="Reading live laptop hardware and required services" className="mb-5 min-h-40" />}
 
       <Panel className="mb-5 overflow-hidden bg-hero">
         <div className="grid gap-6 lg:grid-cols-[1fr_auto] lg:items-center">
