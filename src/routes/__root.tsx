@@ -9,13 +9,14 @@ import {
   type ErrorComponentProps,
 } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
-import { AlertTriangle, ArrowLeft, Boxes, RefreshCw } from "lucide-react";
+import { AlertTriangle, ArrowLeft, RefreshCw } from "lucide-react";
 
 import { AppShell } from "@/components/app-shell";
 import { AuthGate } from "@/components/auth-gate";
 import { Toaster } from "@/components/ui/sonner";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { BrandLogo } from "@/components/brand-logo";
 
 function NotFoundComponent() {
   return (
@@ -52,7 +53,7 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
       <div aria-hidden="true" className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,rgba(59,130,246,0.12),transparent_42%),radial-gradient(ellipse_at_bottom_right,rgba(6,182,212,0.1),transparent_38%)]" />
       <section role="alert" className="relative w-full max-w-xl rounded-3xl border border-slate-200 bg-white/95 p-7 shadow-[0_24px_80px_-36px_rgba(15,23,42,0.28)] sm:p-9">
         <div className="flex items-center gap-3 border-b border-slate-100 pb-5">
-          <div className="grid size-11 place-items-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/20"><Boxes className="size-5" /></div>
+          <BrandLogo className="size-11 rounded-2xl shadow-lg shadow-blue-600/20" />
           <div><p className="font-bold tracking-tight">ComputePool</p><p className="text-xs text-slate-500">Desktop workspace</p></div>
         </div>
         <div className="pt-7">
@@ -102,7 +103,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         rel: "stylesheet",
         href: appCss,
       },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "icon", href: "/assets/computepool-logo.png", type: "image/png" },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=JetBrains+Mono:wght@400;600&family=Manrope:wght@400..800&display=swap" },

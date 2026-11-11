@@ -1,19 +1,25 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import { Cpu, FolderOpen, Laptop, LoaderCircle, MemoryStick, RefreshCw, Send, ShieldCheck, Timer } from "lucide-react";
+import { ArrowLeft, Check, Cpu, FolderOpen, Laptop, LoaderCircle, MemoryStick, Plus, RefreshCw, Send, ShieldCheck, Timer, Users } from "lucide-react";
 import { LoadingPanel, PageHeader, Panel } from "@/components/kit";
 import { IconTile } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { clusterService, fileService, marketplaceService, negotiationService, type Negotiation, type NegotiationMessage, type ProviderNode } from "@/lib/platform";
 
-export const Route = createFileRoute("/chat")({ validateSearch: (search: Record<string, unknown>) => ({ providerId: typeof search["providerId"] === "string" ? search["providerId"] : "", negotiationId: typeof search["negotiationId"] === "string" ? search["negotiationId"] : "" }), head: () => ({ meta: [{ title: "Negotiation · ComputePool" }] }), component: NegotiationChat });
+export const Route = createFileRoute("/chat")({ validateSearch: (search: Record<string, unknown>) => ({ providerId: typeof search["providerId"] === "string" ? search["providerId"] : "", providerIds: typeof search["providerIds"] === "string" ? search["providerIds"] : "", negotiationId: typeof search["negotiationId"] === "string" ? search["negotiationId"] : "", newChat: search["newChat"] === true }), head: () => ({ meta: [{ title: "Negotiation · ComputePool" }] }), component: NegotiationChat });
 function NegotiationChat() {
-  const { providerId, negotiationId } = Route.useSearch();
-  const selectedProviderId = providerId || readSessionValue("computepool-provider-id") || "";
-  const selectedNegotiationId = negotiationId || (!providerId ? readSessionValue("computepool-negotiation-id") || "" : "");
+  const { providerId, providerIds, negotiationId, newChat } = Route.useSearch();
+  const batchProviderIds = [...new Set(providerIds.split(",").map((id) => id.trim()).filter(Boolean))];
+  const batchMode = batchProviderIds.length > 0 && !negotiationId && !newChat;
+  const selectedProviderId = providerId || "";
+  const selectedNegotiationId = negotiationId || "";
+  const freshChat = newChat || (!batchMode && !selectedNegotiationId);
   const navigate = useNavigate();
   const [provider, setProvider] = useState<ProviderNode | null>(null);
+  const [batchProviders, setBatchProviders] = useState<ProviderNode[]>([]);
+  const [selectedWorkerIds, setSelectedWorkerIds] = useState<string[] | null>(null);
+  const [proposalResults, setProposalResults] = useState<{ providerId: string; negotiationId?: string; error?: string }[]>([]);
   const [messages, setMessages] = useState<NegotiationMessage[]>([]);
   const [negotiations, setNegotiations] = useState<Negotiation[]>([]);
   const [accountConversations, setAccountConversations] = useState<Negotiation[]>([]);
@@ -23,37 +29,48 @@ function NegotiationChat() {
   const [memory, setMemory] = useState(4);
   const [minutes, setMinutes] = useState(60);
   const [folder, setFolder] = useState<string | null>(() => readSessionValue("computepool-project-folder"));
-  const [sessionId, setSessionId] = useState<string | null>(() => readSessionValue("computepool-active-session"));
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [connection, setConnection] = useState<{ status: "connecting" | "ready" | "failed"; stages: { id: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string }[]; error?: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const acceptedRequests = negotiations.filter((n) => n.state === "accepted").sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const acceptedRequests = (batchMode ? accountConversations.filter((n) => batchProviderIds.includes(n.providerId)) : negotiations).filter((n) => n.state === "accepted").sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   // A physical provider laptop can only join a K3s cluster once. When older
   // builds allowed repeated proposals, use the latest accepted offer per laptop.
   const acceptedForSession = acceptedRequests.filter((item, index, all) => all.findIndex((candidate) => candidate.providerId === item.providerId) === index);
   const duplicateAcceptedCount = acceptedRequests.length - acceptedForSession.length;
   const accepted = acceptedForSession.length > 0;
+  const selectableAccepted = acceptedForSession;
+  const effectiveWorkerIds = selectedWorkerIds === null ? selectableAccepted.map((n) => n.id) : selectedWorkerIds.filter((id) => selectableAccepted.some((n) => n.id === id));
+  const selectedWorkers = selectableAccepted.filter((n) => effectiveWorkerIds.includes(n.id));
   const currentRequest = negotiations.find((item) => item.id === conversationId);
   const currentRequestState = currentRequest?.state;
-  const canCreateProposal = !currentRequestState || ["rejected", "expired", "ended"].includes(currentRequestState);
+  const activeProviderRequest = accountConversations.filter((item) => item.providerId === selectedProviderId && ["open", "accepted"].includes(item.state)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const canCreateProposal = (!currentRequestState || ["rejected", "expired", "ended"].includes(currentRequestState)) && !activeProviderRequest;
   const load = async () => {
     setInitialLoading(true);
     setError(null);
-    const results = await Promise.allSettled([selectedProviderId ? marketplaceService.get(selectedProviderId) : Promise.resolve(null), negotiationService.list()]);
+    const results = await Promise.allSettled([selectedProviderId ? marketplaceService.get(selectedProviderId) : Promise.resolve(null), negotiationService.list(), batchMode ? marketplaceService.list() : Promise.resolve([] as ProviderNode[])]);
     if (results[0].status === "fulfilled" && results[0].value) setProvider(results[0].value);
     let selectedConversation: Negotiation | undefined;
     if (results[1].status === "fulfilled") {
       const allRows = results[1].value;
       setAccountConversations(allRows.filter((n) => n.myRole === "consumer").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
-      const matching = allRows.filter((n) => selectedNegotiationId ? n.id === selectedNegotiationId : selectedProviderId ? n.providerId === selectedProviderId : n.myRole === "consumer").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      if (batchMode) {
+        setNegotiations(allRows.filter((n) => n.myRole === "consumer"));
+        setConversationId(null);
+        setMessages([]);
+        if (results[2].status === "fulfilled") setBatchProviders(results[2].value.filter((p) => batchProviderIds.includes(p.id)));
+        setInitialLoading(false);
+        const failed = results.find((r) => r.status === "rejected");
+        if (failed?.status === "rejected") setError(failed.reason instanceof Error ? failed.reason.message : "Marketplace or negotiation service unavailable.");
+        return;
+      }
+      const matching = freshChat ? [] : allRows.filter((n) => selectedNegotiationId ? n.id === selectedNegotiationId : selectedProviderId ? n.providerId === selectedProviderId : false).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       setNegotiations(matching);
       selectedConversation = matching[0];
       setConversationId(selectedConversation?.id ?? null);
-      if (selectedConversation) {
-        writeSessionValue("computepool-provider-id", selectedConversation.providerId);
-        writeSessionValue("computepool-negotiation-id", selectedConversation.id);
-      }
       if (selectedConversation) {
         try { setMessages(await negotiationService.messagesById(selectedConversation.id)); }
         catch (e) { setError(e instanceof Error ? e.message : "Conversation messages could not be loaded."); }
@@ -63,7 +80,7 @@ function NegotiationChat() {
     if (failed?.status === "rejected") setError(failed.reason instanceof Error ? failed.reason.message : "Negotiation service unavailable.");
     setInitialLoading(false);
   };
-  useEffect(() => { void load(); }, [selectedProviderId, selectedNegotiationId]);
+  useEffect(() => { void load(); }, [selectedProviderId, selectedNegotiationId, providerIds, freshChat]);
   useEffect(() => {
     if (!conversationId) return;
     let active = true;
@@ -79,38 +96,68 @@ function NegotiationChat() {
     return () => { active = false; window.clearInterval(timer); };
   }, [conversationId]);
   useEffect(() => {
-    if (!conversationId) return;
     let active = true;
     const pollDecision = async () => {
-      try { const latest = await negotiationService.list(); if (active) setNegotiations(latest.filter((n) => selectedNegotiationId ? n.id === selectedNegotiationId : n.providerId === selectedProviderId)); }
+      try {
+        const latest = await negotiationService.list();
+        if (!active) return;
+        const consumerRows = latest.filter((n) => n.myRole === "consumer").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        setAccountConversations(consumerRows);
+        setNegotiations(batchMode ? latest.filter((n) => n.myRole === "consumer") : freshChat ? [] : latest.filter((n) => selectedNegotiationId ? n.id === selectedNegotiationId : n.providerId === selectedProviderId));
+      }
       catch { /* Preserve the last known negotiation state when offline. */ }
     };
     const timer = window.setInterval(() => void pollDecision(), 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [conversationId, selectedProviderId, selectedNegotiationId]);
+  }, [batchMode, selectedProviderId, selectedNegotiationId, freshChat]);
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
     void listen<{ sessionId: string; clusterId: string; status: "connecting" | "ready" | "failed"; stages: { id: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string }[]; error?: string | null }>("computepool-session-progress", ({ payload }) => {
-      if (!active) return;
+      if (!active || freshChat) return;
       setSessionId(payload.sessionId);
       writeSessionValue("computepool-active-session", payload.sessionId);
       setConnection(payload);
       if (payload.error) setError(payload.error);
     }).then((dispose) => { if (active) unlisten = dispose; else dispose(); });
     return () => { active = false; unlisten?.(); };
-  }, []);
+  }, [freshChat]);
+  useEffect(() => {
+    if (!freshChat) return;
+    writeSessionValue("computepool-provider-id", null);
+    writeSessionValue("computepool-negotiation-id", null);
+    writeSessionValue("computepool-active-session", null);
+  }, [freshChat]);
   const send = async () => { if (!text.trim() || !conversationId) return; setBusy(true); setError(null); try { const sent = await negotiationService.sendMessageById(conversationId, text.trim()); setMessages((current) => [...current.filter((m) => m.id !== sent.id), sent].sort((a, b) => a.createdAt.localeCompare(b.createdAt))); setText(""); } catch (e) { setError(e instanceof Error ? e.message : "Message was not sent."); } finally { setBusy(false); } };
   const propose = async () => {
     if (!selectedProviderId || !canCreateProposal) return;
     setBusy(true); setError(null);
     try {
       const created = await negotiationService.sendProposal(selectedProviderId, { cpuCores: cpu, memoryBytes: memory * 1024 ** 3, gpuIds: [], }, minutes);
-      writeSessionValue("computepool-provider-id", selectedProviderId);
-      writeSessionValue("computepool-negotiation-id", created.id);
       setSessionId(null); writeSessionValue("computepool-active-session", null); setConnection(null);
       await navigate({ to: "/chat", search: { providerId: selectedProviderId, negotiationId: created.id } });
     } catch (e) { setError(e instanceof Error ? e.message : "Proposal could not be sent."); }
+    finally { setBusy(false); }
+  };
+  const proposeToSelected = async () => {
+    const targets = batchProviders.filter((p) => p.online && batchProviderIds.includes(p.id));
+    if (!targets.length) return;
+    setBusy(true); setError(null); setProposalResults([]);
+    const activeProviderIds = new Set(accountConversations.filter((n) => ["open", "accepted"].includes(n.state)).map((n) => n.providerId));
+    const eligible = targets.filter((p) => !activeProviderIds.has(p.id));
+    const skipped = targets.filter((p) => activeProviderIds.has(p.id)).map((p) => ({ providerId: p.id, error: "An open or accepted request already exists for this provider." }));
+    try {
+      const outcomes = await Promise.allSettled(eligible.map(async (p) => ({ providerId: p.id, negotiation: await negotiationService.sendProposal(p.id, { cpuCores: cpu, memoryBytes: memory * 1024 ** 3, gpuIds: [] }, minutes) })));
+      const sent = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [{ providerId: outcome.value.providerId, negotiationId: outcome.value.negotiation.id }] : []);
+      const failed = outcomes.flatMap((outcome, index) => outcome.status === "rejected" ? [{ providerId: eligible[index].id, error: outcome.reason instanceof Error ? outcome.reason.message : "Proposal failed." }] : []);
+      setProposalResults([...skipped, ...sent, ...failed]);
+      if (sent.length) {
+        const latest = await negotiationService.list();
+        setAccountConversations(latest.filter((n) => n.myRole === "consumer").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+        setNegotiations(latest.filter((n) => n.myRole === "consumer"));
+      }
+      if (failed.length) setError(`${sent.length} proposal${sent.length === 1 ? "" : "s"} sent; ${failed.length} failed. Successful requests remain active.`);
+    } catch (e) { setError(e instanceof Error ? e.message : "Proposals could not be sent."); }
     finally { setBusy(false); }
   };
   const closeRequest = async () => {
@@ -128,7 +175,7 @@ function NegotiationChat() {
     finally { setBusy(false); }
   };
   const chooseFolder = async () => { setBusy(true); setError(null); try { const selected = await fileService.chooseProjectFolder(); setFolder(selected); writeSessionValue("computepool-project-folder", selected); } catch (e) { setError(e instanceof Error ? e.message : "Folder picker unavailable."); } finally { setBusy(false); } };
-  const startSession = async () => { if (connection?.status === "failed") { setSessionId(null); writeSessionValue("computepool-active-session", null); setConnection(null); } setBusy(true); setError(null); try { const acceptedIds = acceptedForSession.map((n) => n.id); const setup = await clusterService.startSession(acceptedIds, folder!); setSessionId(setup.sessionId); writeSessionValue("computepool-active-session", setup.sessionId); setConnection((current) => current ?? { status: "connecting", stages: [] }); } catch (e) { setError(e instanceof Error ? e.message : "Session did not start."); } finally { setBusy(false); } };
+  const startSession = async () => { if (connection?.status === "failed") { setSessionId(null); writeSessionValue("computepool-active-session", null); setConnection(null); } setBusy(true); setError(null); try { const acceptedIds = selectedWorkers.map((n) => n.id); if (!acceptedIds.length) throw new Error("Select at least one provider who has accepted."); const setup = await clusterService.startSession(acceptedIds, folder!); setSessionId(setup.sessionId); writeSessionValue("computepool-active-session", setup.sessionId); setConnection((current) => current ?? { status: "connecting", stages: [] }); } catch (e) { setError(e instanceof Error ? e.message : "Session did not start."); } finally { setBusy(false); } };
 
   useEffect(() => {
     if (!sessionId) return;
@@ -147,10 +194,35 @@ function NegotiationChat() {
     return () => { active = false; window.clearInterval(timer); };
   }, [sessionId, navigate]);
 
-  return <div className="w-full min-w-0"><PageHeader eyebrow="Consumer · step 2" title="Chat & agree first"><Button variant="outline" className="rounded-xl" onClick={() => void load()} disabled={busy}><RefreshCw className="mr-2 size-4" />Refresh conversation</Button></PageHeader>
-    {accountConversations.length > 0 && <Panel className="mb-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h2 className="font-bold">Your conversation history</h2><p className="mt-1 text-xs text-muted-foreground">Every provider request from this account, including closed conversations.</p></div><span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold">{accountConversations.length} total</span></div><div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{accountConversations.map((item) => <Link key={item.id} to="/chat" search={{ providerId: item.providerId, negotiationId: item.id }} className={`rounded-xl border p-3 transition hover:border-primary/40 hover:bg-primary/5 ${item.id === conversationId ? "border-primary bg-primary/5" : "border-border bg-white"}`}><div className="flex items-start justify-between gap-2"><p className="truncate text-sm font-semibold">{item.providerName ?? item.providerId}</p><span className="rounded-full bg-muted px-2 py-0.5 text-[10px] capitalize text-muted-foreground">{item.state}</span></div><p className="mt-1 text-[11px] text-muted-foreground">{new Date(item.updatedAt ?? item.createdAt ?? "").toLocaleString()}</p><p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{item.id}</p></Link>)}</div></Panel>}
-    {initialLoading ? <LoadingPanel label="Loading conversation, account history, and provider status" /> : !selectedProviderId ? <Panel className="py-10 text-center"><IconTile icon={Laptop} tone="blue" size="lg" className="mx-auto" /><h2 className="mt-4 text-xl font-bold">{accountConversations.length ? "Choose a conversation above" : "Choose a provider to begin"}</h2><p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">{accountConversations.length ? "Your prior chats stay available above, with all messages and request details." : "Open a live provider from the marketplace. The terminal appears only after the provider accepts and a session is connected."}</p><Link to="/marketplace" className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Find providers</Link></Panel> : <>
+  return <div className="w-full min-w-0"><PageHeader eyebrow="Consumer · step 2" title="Chat & agree first">{providerIds ? <Link to="/chat" search={{ providerIds }} className="inline-flex items-center rounded-xl border border-border bg-white px-4 py-2 text-sm font-semibold hover:bg-muted"><ArrowLeft className="mr-2 size-4" />Back to selection</Link> : <Link to="/marketplace" className="inline-flex items-center rounded-xl border border-border bg-white px-4 py-2 text-sm font-semibold hover:bg-muted"><ArrowLeft className="mr-2 size-4" />Back to providers</Link>}{selectedProviderId && <Link to="/chat" search={{ providerId: selectedProviderId, providerIds, newChat: true }} className="inline-flex items-center rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90"><Plus className="mr-2 size-4" />New chat</Link>}{accountConversations.length > 0 && freshChat && <Button variant="outline" className="rounded-xl" onClick={() => setHistoryExpanded((open) => !open)}>{historyExpanded ? "Hide history" : `Show history (${accountConversations.length})`}</Button>}<Button variant="outline" className="rounded-xl" onClick={() => void load()} disabled={busy}><RefreshCw className="mr-2 size-4" />Refresh conversation</Button></PageHeader>
+    {accountConversations.length > 0 && (!freshChat || historyExpanded) && <Panel className="mb-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h2 className="font-bold">Your conversation history</h2><p className="mt-1 text-xs text-muted-foreground">Every provider request from this account, including closed conversations.</p></div><span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold">{accountConversations.length} total</span></div><div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{accountConversations.map((item) => <Link key={item.id} to="/chat" search={{ providerId: item.providerId, providerIds, negotiationId: item.id }} className={`rounded-xl border p-3 transition hover:border-primary/40 hover:bg-primary/5 ${item.id === conversationId ? "border-primary bg-primary/5" : "border-border bg-white"}`}><div className="flex items-start justify-between gap-2"><p className="truncate text-sm font-semibold">{item.providerName ?? item.providerId}</p><span className="rounded-full bg-muted px-2 py-0.5 text-[10px] capitalize text-muted-foreground">{item.state}</span></div><p className="mt-1 text-[11px] text-muted-foreground">{new Date(item.updatedAt ?? item.createdAt ?? "").toLocaleString()}</p><p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{item.id}</p></Link>)}</div></Panel>}
+    {initialLoading ? <LoadingPanel label="Loading conversation, account history, and provider status" /> : batchMode ? <>
       {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}
+      <Panel className="mb-4 bg-gradient-to-r from-primary/5 via-white to-cyan-50"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-3"><IconTile icon={Users} tone="blue" size="md" /><div><h2 className="text-lg font-bold">Negotiate with {batchProviderIds.length} providers</h2><p className="mt-1 max-w-2xl text-sm text-muted-foreground">Each provider receives a separate proposal and can accept or decline independently. Only accepted providers you select will join the shared cluster as worker nodes.</p></div></div></div><Link to="/marketplace" className="rounded-xl border border-border bg-white px-3 py-2 text-sm font-semibold hover:bg-muted">Change selection</Link></div></Panel>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <Panel>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-bold">Selected providers</h2><p className="mt-1 text-xs text-muted-foreground">Current availability and the latest request status for each laptop.</p></div><span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold">{batchProviderIds.length} selected</span></div>
+          <div className="grid gap-3 md:grid-cols-2">{batchProviderIds.map((id) => {
+            const live = batchProviders.find((item) => item.id === id);
+            const latestRequest = accountConversations.filter((item) => item.providerId === id).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+            const outcome = proposalResults.find((item) => item.providerId === id);
+            const canPropose = !!live?.online && (!latestRequest || ["rejected", "expired", "ended"].includes(latestRequest.state));
+            return <article key={id} className="rounded-2xl border border-border bg-white p-4 shadow-sm"><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><IconTile icon={Laptop} tone={live?.online ? "green" : "slate"} size="sm" /><div className="min-w-0"><h3 className="truncate font-semibold">{live?.displayName ?? latestRequest?.providerName ?? id}</h3><p className="truncate font-mono text-[11px] text-muted-foreground">{live?.netbirdIp ?? "NetBird IP not reported"}</p></div></div><span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${live?.online ? "bg-success-soft text-success" : "bg-muted text-muted-foreground"}`}>{live?.online ? "Online" : "Offline"}</span></div>
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-muted-foreground">{live?.availableCores != null && <span className="rounded-lg bg-muted px-2 py-1">{live.availableCores} CPU</span>}{live?.availableMemoryBytes != null && <span className="rounded-lg bg-muted px-2 py-1">{(live.availableMemoryBytes / 1024 ** 3).toFixed(1)} GiB RAM</span>}{live?.gpuNames?.length ? <span className="rounded-lg bg-muted px-2 py-1">{live.gpuNames.length} GPU</span> : null}</div>
+              <div className="mt-3 rounded-xl bg-muted/70 p-3"><p className="text-xs font-semibold">{latestRequest ? `Latest request · ${latestRequest.state}` : "No proposal sent yet"}</p>{latestRequest && <p className="mt-1 text-[11px] text-muted-foreground">Updated {new Date(latestRequest.updatedAt || latestRequest.createdAt).toLocaleString()}</p>}{outcome && <p className={`mt-1 text-[11px] ${outcome.error ? "text-destructive" : "text-success"}`}>{outcome.error ? outcome.error : "Proposal sent · waiting for provider decision"}</p>}{!live && <p className="mt-1 text-[11px] text-muted-foreground">Provider is missing from the live directory. Refresh the marketplace before proposing.</p>}</div>
+              <div className="mt-3 flex flex-wrap gap-2"><Link to="/chat" search={{ providerId: id, providerIds: batchProviderIds.join(","), negotiationId: latestRequest?.id ?? "" }} className="min-w-24 flex-1 rounded-xl border border-border px-3 py-2 text-center text-xs font-semibold hover:bg-muted">{latestRequest ? "Open chat" : "View provider"}</Link><Link to="/chat" search={{ providerId: id, providerIds: batchProviderIds.join(","), newChat: true }} title={!canPropose ? "Close the active request before starting another chat." : "Start a fresh chat with this provider."} className={`min-w-24 flex-1 rounded-xl border px-3 py-2 text-center text-xs font-semibold ${canPropose ? "border-primary/30 bg-primary/5 text-primary hover:bg-primary/10" : "cursor-not-allowed border-border text-muted-foreground opacity-60"}`}>New chat</Link>{latestRequest?.state === "accepted" && <span className="rounded-xl bg-success-soft px-3 py-2 text-xs font-semibold text-success">Accepted</span>}{!canPropose && latestRequest && ["open", "accepted"].includes(latestRequest.state) && <span className="rounded-xl bg-primary/5 px-3 py-2 text-xs font-semibold text-primary">{latestRequest.state === "open" ? "Awaiting decision" : "Ready"}</span>}</div>
+            </article>;
+          })}</div>
+          <div className="mt-4 rounded-2xl border border-primary/15 bg-primary/[0.03] p-4"><div className="flex items-center gap-2"><IconTile icon={Send} tone="blue" size="sm" /><div><h3 className="text-sm font-bold">Send the same resource proposal</h3><p className="text-xs text-muted-foreground">Each provider gets their own request; one provider’s decision does not affect the others.</p></div></div><div className="mt-3 grid gap-3 sm:grid-cols-3"><label className="text-xs font-semibold">CPU cores<input type="number" min={1} max={256} step={1} value={cpu} onChange={(e) => setCpu(Math.max(1, Math.min(256, Number(e.target.value) || 1)))} className="mt-1 h-10 w-full rounded-xl border border-border bg-white px-3" /></label><label className="text-xs font-semibold">Memory (GiB)<input type="number" min={1} max={1024} step={1} value={memory} onChange={(e) => setMemory(Math.max(1, Math.min(1024, Number(e.target.value) || 1)))} className="mt-1 h-10 w-full rounded-xl border border-border bg-white px-3" /></label><label className="text-xs font-semibold">Duration (minutes)<input type="number" min={1} max={10080} step={1} value={minutes} onChange={(e) => setMinutes(Math.max(1, Math.min(10080, Number(e.target.value) || 1)))} className="mt-1 h-10 w-full rounded-xl border border-border bg-white px-3" /></label></div><Button className="mt-3 w-full rounded-xl" onClick={() => void proposeToSelected()} disabled={busy || !batchProviders.some((p) => p.online && batchProviderIds.includes(p.id)) || batchProviders.filter((p) => p.online && batchProviderIds.includes(p.id)).every((p) => accountConversations.some((n) => n.providerId === p.id && ["open", "accepted"].includes(n.state)))}>{busy ? <LoaderCircle className="mr-2 size-4 animate-spin" /> : <Send className="mr-2 size-4" />}Send proposal to eligible online providers</Button><p className="mt-2 text-[11px] text-muted-foreground">Providers with an open or accepted request are skipped. Declined, expired, and ended requests can be proposed to again.</p></div>
+        </Panel>
+        <div className="space-y-4"><Panel><div className="flex items-center justify-between gap-3"><div><h2 className="font-bold">Accepted worker nodes</h2><p className="mt-1 text-xs text-muted-foreground">Choose which accepted laptops to include in this cluster.</p></div><span className="rounded-full bg-muted px-2.5 py-1 text-xs font-semibold">{selectedWorkers.length}/{selectableAccepted.length}</span></div>
+            {selectableAccepted.length ? <><div className="mt-3 flex justify-end"><button className="text-xs font-semibold text-primary hover:underline" onClick={() => setSelectedWorkerIds(selectableAccepted.map((n) => n.id))}>Select all accepted</button></div><div className="mt-2 space-y-2">{selectableAccepted.map((item) => <label key={item.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-muted/40"><input type="checkbox" checked={effectiveWorkerIds.includes(item.id)} onChange={(e) => setSelectedWorkerIds(e.target.checked ? [...effectiveWorkerIds, item.id] : effectiveWorkerIds.filter((id) => id !== item.id))} className="mt-1 accent-primary" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{item.providerName ?? item.providerId}</span><span className="mt-1 block text-[11px] text-muted-foreground">Accepted · {new Date(item.updatedAt || item.createdAt).toLocaleString()}</span></span><Check className="size-4 text-success" /></label>)}</div>{duplicateAcceptedCount > 0 && <p className="mt-2 text-[11px] text-muted-foreground">{duplicateAcceptedCount} older duplicate accepted request(s) are ignored; a laptop joins the cluster only once.</p>}</> : <div className="mt-3 rounded-xl bg-muted p-3 text-xs leading-5 text-muted-foreground">No provider has accepted yet. Open a provider chat to discuss the request; accepted providers will appear here automatically.</div>}
+          </Panel><Panel><div className="flex items-center gap-3"><IconTile icon={FolderOpen} tone="cyan" size="md" /><div><h2 className="font-bold">Project folder</h2><p className="text-xs text-muted-foreground">Outputs and logs return to this consumer laptop.</p></div></div><Button variant="outline" className="mt-3 w-full rounded-xl" disabled={!accepted || busy || (!!sessionId && connection?.status !== "failed")} onClick={() => void chooseFolder()}><FolderOpen className="mr-2 size-4" />{folder ? "Change folder" : "Choose project folder"}</Button>{folder && <p className="mt-2 break-all text-xs text-muted-foreground">{folder}</p>}<Button className="mt-3 w-full rounded-xl" disabled={!selectedWorkers.length || !folder || busy || (!!sessionId && connection?.status !== "failed")} onClick={() => void startSession()}>{busy ? <LoaderCircle className="mr-2 size-4 animate-spin" /> : <ShieldCheck className="mr-2 size-4" />}{connection?.status === "failed" ? `Retry with ${selectedWorkers.length} worker(s)` : `Start session with ${selectedWorkers.length} worker(s)`}</Button></Panel></div>
+      </div>
+      {sessionId && <Panel className="mt-4"><div className="flex items-center gap-3"><LoaderCircle className={`size-5 text-primary ${connection?.status === "failed" ? "hidden" : "animate-spin"}`} /><div><h2 className="font-bold">{connection?.status === "failed" ? "Connection failed" : connection?.status === "ready" ? "Cluster connected" : "Establishing multi-provider cluster"}</h2><p className="text-xs text-muted-foreground">Session {sessionId} · {connection?.status === "ready" ? "all selected nodes are ready" : connection?.status === "failed" ? "review the failed stage, fix it, then retry" : "the dashboard opens when all selected nodes are Ready."}</p></div></div>{connection?.stages.length ? <div className="mt-5 grid gap-2 sm:grid-cols-2">{connection.stages.map((stage) => <div key={stage.id} className="flex items-start gap-3 rounded-xl border border-border p-3"><span className={`mt-1 size-2 rounded-full ${stage.status === "completed" ? "bg-success" : stage.status === "running" ? "bg-primary animate-pulse" : stage.status === "failed" ? "bg-destructive" : "bg-muted-foreground"}`} /><div><p className="text-sm font-semibold">{stage.label}</p><p className="mt-1 text-xs capitalize text-muted-foreground">{stage.status}{stage.detail ? ` · ${stage.detail}` : ""}</p></div></div>)}</div> : <p className="mt-4 text-sm text-muted-foreground">Waiting for live connection stages from the session service…</p>}</Panel>}
+    </> : !selectedProviderId ? <Panel className="py-10 text-center"><IconTile icon={Laptop} tone="blue" size="lg" className="mx-auto" /><h2 className="mt-4 text-xl font-bold">Start a new chat</h2><p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">Choose a provider from the marketplace to begin a fresh conversation. Previous chats are available from Show history.</p><Link to="/marketplace" className="mt-4 inline-flex rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Find providers</Link></Panel> : <>
+      {error && <Panel className="mb-4 border-warning/40 text-sm text-muted-foreground">{error}</Panel>}
+      {newChat && activeProviderRequest && <Panel className="mb-4 border-primary/20 bg-primary/5"><p className="font-semibold">There’s already an active request with this provider.</p><p className="mt-1 text-sm text-muted-foreground">To avoid duplicate open requests, continue that chat or close it before starting a fresh proposal.</p><Link to="/chat" search={{ providerId: selectedProviderId, providerIds, negotiationId: activeProviderRequest.id }} className="mt-3 inline-flex items-center gap-2 rounded-xl border border-border bg-white px-3 py-2 text-sm font-semibold"><ArrowLeft className="size-4" />Open active chat</Link></Panel>}
       <Panel className="mb-4"><div className="flex items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><IconTile icon={Laptop} tone={provider?.online ? "green" : "slate"} size="md" /><div className="min-w-0"><p className="text-xs font-semibold uppercase tracking-widest text-primary">Selected provider</p><h2 className="mt-1 truncate text-xl font-bold">{provider?.displayName ?? "Loading live provider…"}</h2></div></div><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${provider?.online ? "bg-success-soft text-success" : "bg-muted text-muted-foreground"}`}>{provider ? provider.online ? "Online" : "Offline" : "Status unavailable"}</span></div></Panel>
       <div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
         <Panel className="flex min-h-[min(72vh,760px)] flex-col"><div className="flex-1 space-y-3 overflow-y-auto pb-4">{messages.length ? messages.map((m) => <div key={m.id} className={`flex ${m.sender === "consumer" ? "justify-end" : "justify-start"}`}><div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${m.sender === "consumer" ? "bg-primary text-primary-foreground" : "border border-border bg-background"}`}><p>{m.text}</p>{m.proposal && <div className="mt-3 border-t border-current/15 pt-3 text-xs">Proposal · {m.proposal.cpuCores} CPU · {(m.proposal.memoryBytes / 1024 ** 3).toFixed(1)} GB RAM · {m.proposal.durationMinutes} min · {m.proposal.priceAmount} {m.proposal.currency}<p className="mt-1 font-bold">{m.proposal.state}</p></div>}<time className="mt-2 block text-[10px] opacity-60">{new Date(m.createdAt).toLocaleString()}</time></div></div>) : <div className="grid h-full min-h-48 place-items-center text-center"><p className="max-w-sm text-sm text-muted-foreground">No messages have been returned for this conversation. Send a message to begin; provider replies arrive through the live negotiation service.</p></div>}</div>

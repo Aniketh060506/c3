@@ -72,19 +72,26 @@ function Overview() {
       </PageHeader>
       {loading && !hardware && !deps && <LoadingPanel label="Reading live laptop hardware and required services" className="mb-5 min-h-40" />}
 
-      <Panel className="mb-5 overflow-hidden bg-hero">
-        <div className="grid gap-6 lg:grid-cols-[1fr_auto] lg:items-center">
+      <section aria-label="ComputePool introduction" className="readiness-hero relative mb-4 flex min-h-[340px] h-[min(48vh,460px)] overflow-hidden rounded-3xl border border-border text-white shadow-soft">
+        <video className="absolute inset-0 size-full object-cover" src="/assets/bird-flight.mp4" autoPlay muted loop playsInline aria-hidden="true" />
+        <div className="absolute inset-0 bg-gradient-to-r from-slate-950/85 via-slate-950/55 to-slate-950/25" />
+        <div className="relative z-10 flex w-full flex-col justify-between gap-6 p-6 sm:p-9 lg:p-11">
           <div>
-            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs font-semibold">
-              <span className={`size-2 rounded-full ${hardware ? "bg-success" : "bg-muted-foreground"}`} />
+            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/20 bg-slate-950/35 px-3 py-1.5 text-xs font-semibold text-white">
+              <span className={`size-2 rounded-full ${hardware ? "bg-emerald-400" : "bg-slate-400"}`} />
               {hardware ? `Live · updated ${formatTime(updated)}` : "Waiting for live desktop diagnostics"}
             </div>
-            <h2 className="max-w-3xl text-3xl font-bold md:text-4xl">One app. Two ways to compute.</h2>
-            <p className="mt-3 max-w-2xl text-muted-foreground">Check this laptop first, then choose whether to rent capacity from online providers or share resources from this machine.</p>
+            <h2 className="max-w-2xl text-3xl font-bold tracking-tight md:text-5xl">One app. Two ways to compute.</h2>
+            <p className="mt-3 max-w-xl text-sm leading-6 text-white/85 md:text-base">Check this laptop first, then rent capacity from online providers or share resources from this machine.</p>
           </div>
-          <NetworkArtwork />
+          <a href="#about-computepool" className="inline-flex w-fit items-center gap-2 rounded-xl border border-white/25 bg-slate-950/35 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-950/55">About this application <ArrowRight className="size-4" /></a>
         </div>
-      </Panel>
+      </section>
+
+      <details id="about-computepool" className="group mb-5 rounded-2xl border border-border bg-white shadow-soft">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-2xl px-5 py-4 text-sm font-bold marker:hidden"><span>About this application</span><span className="text-xs font-medium text-muted-foreground group-open:hidden">Show details</span><span className="hidden text-xs font-medium text-muted-foreground group-open:inline">Hide details</span></summary>
+        <p className="border-t border-border px-5 py-4 text-sm leading-6 text-muted-foreground">ComputePool connects people who need compute with providers who choose to share it. Agree on resources first, connect selected provider laptops to an isolated Kubernetes cluster, then run workloads with live placement and status reporting. Hardware readings below come directly from this laptop.</p>
+      </details>
 
       <section aria-label="How ComputePool works" className="mb-5 grid gap-3 rounded-3xl border border-border bg-white p-4 shadow-soft sm:grid-cols-[1fr_auto_1fr_auto_1fr] sm:items-center sm:p-5">
         <FlowStep icon={Cpu} number="01" title="Check this laptop" detail="Live hardware and runtime readiness" />
@@ -227,21 +234,21 @@ function StorageDrive() {
 function NetworkArtwork() {
   return <div aria-hidden="true" className="relative hidden size-36 place-items-center sm:grid">
     <div className="absolute inset-3 rounded-full border border-primary/10" />
-    <div className="absolute inset-0 rounded-full border border-dashed border-primary/15 network-orbit" />
+    <div className="absolute inset-0 rounded-full border border-dashed border-primary/15" />
     <div className="absolute inset-5 rounded-full bg-primary/5 blur-xl" />
     <div className="relative grid size-20 place-items-center rounded-[1.75rem] bg-primary text-primary-foreground shadow-lift"><Boxes className="size-9" /></div>
-    <span className="network-pulse absolute left-4 top-7 grid size-9 place-items-center rounded-xl border border-white bg-white text-primary shadow-soft"><Cpu className="size-4" /></span>
-    <span className="network-pulse absolute right-3 top-12 grid size-9 place-items-center rounded-xl border border-white bg-white text-primary shadow-soft [animation-delay:700ms]"><Network className="size-4" /></span>
-    <span className="network-pulse absolute bottom-4 left-12 grid size-9 place-items-center rounded-xl border border-white bg-white text-primary shadow-soft [animation-delay:1400ms]"><Store className="size-4" /></span>
+    <span className="absolute left-4 top-7 grid size-9 place-items-center rounded-xl border border-white bg-white text-primary shadow-soft"><Cpu className="size-4" /></span>
+    <span className="absolute right-3 top-12 grid size-9 place-items-center rounded-xl border border-white bg-white text-primary shadow-soft"><Network className="size-4" /></span>
+    <span className="absolute bottom-4 left-12 grid size-9 place-items-center rounded-xl border border-white bg-white text-primary shadow-soft"><Store className="size-4" /></span>
     <span className="absolute right-7 top-4 size-1.5 rounded-full bg-success shadow-[0_0_0_5px_oklch(0.66_0.15_158_/_12%)]" />
   </div>;
 }
 
 function FlowStep({ icon: Icon, number, title, detail }: { icon: typeof Cpu; number: string; title: string; detail: string }) {
-  return <motion.div whileHover={{ x: 2 }} className="flex items-center gap-3 rounded-2xl px-2 py-2 sm:px-1">
+  return <div className="flex items-center gap-3 rounded-2xl px-2 py-2 sm:px-1">
     <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary-soft text-primary"><Icon className="size-4" /></span>
     <span className="min-w-0"><span className="block text-[10px] font-bold tracking-[0.14em] text-primary">STEP {number}</span><span className="block text-sm font-bold">{title}</span><span className="block text-xs text-muted-foreground">{detail}</span></span>
-  </motion.div>;
+  </div>;
 }
 
 function DependencyRow({ dep, busy, onInstall, onRefresh }: { dep: Dependency; busy: boolean; onInstall: () => void; onRefresh: () => void }) {

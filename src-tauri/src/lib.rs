@@ -10,6 +10,7 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     process::{Command, Output, Stdio},
     path::Path,
+    io::Write,
     sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -31,6 +32,12 @@ static ACTIVE_COMPUTE_SESSION: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
 static SESSION_PROGRESS: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 static JOB_OUTPUT_TARGETS: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 static JOB_OUTPUT_SYNCED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+struct PodTerminalSession {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+}
+static POD_TERMINALS: OnceLock<Mutex<HashMap<String, PodTerminalSession>>> = OnceLock::new();
 static CLOSE_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,6 +139,8 @@ struct KubernetesPod {
     name: String,
     phase: String,
     containers: Vec<String>,
+    image: String,
+    node_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -686,8 +695,34 @@ async fn list_running_pods(cluster_id: String) -> Result<Vec<KubernetesPod>, Str
     Ok(value.pointer("/items").and_then(Value::as_array).into_iter().flatten().filter_map(|pod| {
         let metadata = pod.get("metadata")?;
         let status = pod.get("status")?;
-        Some(KubernetesPod { namespace: metadata.get("namespace")?.as_str()?.to_string(), name: metadata.get("name")?.as_str()?.to_string(), phase: status.get("phase")?.as_str()?.to_string(), containers: pod.pointer("/spec/containers").and_then(Value::as_array).into_iter().flatten().filter_map(|c| c.get("name").and_then(Value::as_str).map(ToOwned::to_owned)).collect() })
+        Some(KubernetesPod { namespace: metadata.get("namespace")?.as_str()?.to_string(), name: metadata.get("name")?.as_str()?.to_string(), phase: status.get("phase")?.as_str()?.to_string(), containers: pod.pointer("/spec/containers").and_then(Value::as_array).into_iter().flatten().filter_map(|c| c.get("name").and_then(Value::as_str).map(ToOwned::to_owned)).collect(), image: pod.pointer("/spec/containers/0/image").and_then(Value::as_str).unwrap_or_default().to_string(), node_name: pod.pointer("/spec/nodeName").and_then(Value::as_str).map(ToOwned::to_owned) })
     }).filter(|pod| pod.phase == "Running").collect())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_interactive_pod_status(cluster_id: String, namespace: String, pod_name: String) -> Result<Value, String> {
+    if cluster_id != SHARED_CLUSTER_ID { return Err("The selected ComputePool cluster is no longer active.".into()); }
+    let output = cluster_output(&cluster_id, &["get", "pod", "--namespace", &namespace, &pod_name, "-o", "json"])
+        .ok_or_else(|| "Docker or kubectl could not query the active cluster.".to_string())?;
+    if !output.status.success() { return Err(format!("Could not refresh pod status: {}", output_text(&output))); }
+    let pod: Value = serde_json::from_slice(&output.stdout).map_err(|e| format!("kubectl returned invalid pod JSON: {e}"))?;
+    let ready = pod.pointer("/status/containerStatuses").and_then(Value::as_array).is_some_and(|containers| !containers.is_empty() && containers.iter().all(|c| c.pointer("/ready").and_then(Value::as_bool) == Some(true)));
+    let restarts: u64 = pod.pointer("/status/containerStatuses").and_then(Value::as_array).into_iter().flatten().map(|c| c.get("restartCount").and_then(Value::as_u64).unwrap_or(0)).sum();
+    let container_state = pod.pointer("/status/containerStatuses/0/state");
+    let waiting_reason = container_state.and_then(|state| state.get("waiting")).and_then(|state| state.get("reason")).and_then(Value::as_str);
+    let waiting_message = container_state.and_then(|state| state.get("waiting")).and_then(|state| state.get("message")).and_then(Value::as_str);
+    Ok(json!({
+        "phase": pod.pointer("/status/phase").and_then(Value::as_str).unwrap_or("Unknown"),
+        "ready": ready,
+        "waitingReason": waiting_reason,
+        "waitingMessage": waiting_message,
+        "restarts": restarts,
+        "nodeName": pod.pointer("/spec/nodeName").and_then(Value::as_str),
+        "podIp": pod.pointer("/status/podIP").and_then(Value::as_str),
+        "startedAt": pod.pointer("/status/startTime").and_then(Value::as_str),
+        "usage": "",
+        "conditions": pod.pointer("/status/conditions").and_then(Value::as_array).cloned().unwrap_or_default()
+    }))
 }
 
 fn cluster_gpu_capacity(cluster_id: &str, selected_nodes: Option<&[String]>) -> Result<u32, String> {
@@ -702,14 +737,23 @@ fn cluster_gpu_capacity(cluster_id: &str, selected_nodes: Option<&[String]>) -> 
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn create_interactive_pod(cluster_id: String, image: String, cpu_cores: u32, memory_gib: u32, gpu_count: u32, namespace: String) -> Result<Value, String> {
+async fn create_interactive_pod(cluster_id: String, image: String, cpu_cores: u32, memory_gib: u32, gpu_count: u32, namespace: String, target_node: Option<String>) -> Result<Value, String> {
     if cluster_id != SHARED_CLUSTER_ID || ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "Session state is unavailable.")?.is_none() {
         return Err("Start a connected ComputePool cluster before creating a pod.".into());
     }
     if image.trim().is_empty() || image.chars().any(char::is_whitespace) { return Err("Enter a valid container image reference.".into()); }
     if cpu_cores == 0 || memory_gib == 0 || cpu_cores > 256 || memory_gib > 4096 || gpu_count > 32 { return Err("Requested resources are outside the supported range.".into()); }
     if namespace.is_empty() || namespace.len() > 63 || !namespace.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') || !namespace.as_bytes()[0].is_ascii_alphanumeric() || !namespace.as_bytes()[namespace.len() - 1].is_ascii_alphanumeric() { return Err("Namespace must be a Kubernetes name: 1–63 lowercase letters, digits, or hyphens, starting and ending with a letter or digit.".into()); }
-    if gpu_count > 0 && cluster_gpu_capacity(&cluster_id, None)? < gpu_count {
+    let node_hostname = if let Some(node_id) = target_node.as_deref() {
+        if node_id.is_empty() || node_id.len() > 253 || node_id.chars().any(char::is_whitespace) { return Err("The selected Kubernetes node name is invalid.".into()); }
+        let output = cluster_output(&cluster_id, &["get", "node", node_id, "-o", "json"]).ok_or("Docker or kubectl could not validate the selected node.")?;
+        if !output.status.success() { return Err(format!("Could not validate selected node {node_id}: {}", output_text(&output))); }
+        let node: Value = serde_json::from_slice(&output.stdout).map_err(|e| format!("Kubernetes returned invalid node data: {e}"))?;
+        let is_ready = node.pointer("/status/conditions").and_then(Value::as_array).into_iter().flatten().any(|condition| condition["type"] == "Ready" && condition["status"] == "True");
+        if !is_ready { return Err(format!("Node {node_id} is not Ready. Refresh the session dashboard and choose a ready node.")); }
+        Some(node.pointer("/metadata/labels/kubernetes.io~1hostname").and_then(Value::as_str).unwrap_or(node_id).to_string())
+    } else { None };
+    if gpu_count > 0 && cluster_gpu_capacity(&cluster_id, target_node.as_ref().map(std::slice::from_ref))? < gpu_count {
         return Err("This active cluster does not advertise enough schedulable NVIDIA GPUs. GPU display adapters are detected locally, but K3s GPU device-plugin scheduling is not configured in this build.".into());
     }
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -720,7 +764,7 @@ async fn create_interactive_pod(cluster_id: String, image: String, cpu_cores: u3
         requests["nvidia.com/gpu"] = json!(gpu_count.to_string());
         limits["nvidia.com/gpu"] = json!(gpu_count.to_string());
     }
-    let pod_spec = json!({
+    let mut pod_spec = json!({
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {"name": pod_name, "namespace": namespace, "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/role": "interactive-shell"}},
@@ -735,58 +779,134 @@ async fn create_interactive_pod(cluster_id: String, image: String, cpu_cores: u3
             }]
         }
     });
+    if let Some(hostname) = node_hostname.as_deref() { pod_spec["spec"]["nodeSelector"] = json!({"kubernetes.io/hostname": hostname}); }
     let manifest = serde_json::to_vec(&pod_spec).map_err(|error| format!("Could not encode the pod specification: {error}"))?;
     let output = kubectl_with_input(&["create", "-f", "-"], &manifest)?;
     if !output.status.success() { return Err(format!("Could not create the interactive pod: {}", output_text(&output))); }
     // Return as soon as the API server accepts the pod. Image pulls can take
     // longer than a fixed kubectl wait timeout, and deleting the pod here
     // prevents kubelet's own ImagePullBackOff retry from recovering.
-    Ok(json!({"namespace": namespace, "podName": pod_name, "image": image.trim(), "cpuCores": cpu_cores, "memoryGiB": memory_gib, "gpuCount": gpu_count}))
+    Ok(json!({"namespace": namespace, "podName": pod_name, "image": image.trim(), "cpuCores": cpu_cores, "memoryGiB": memory_gib, "gpuCount": gpu_count, "nodeName": node_hostname}))
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn open_pod_shell(cluster_id: String, namespace: String, pod_name: String, container: Option<String>) -> Result<Value, String> {
+async fn open_pod_shell(app: AppHandle, cluster_id: String, namespace: String, pod_name: String, container: Option<String>) -> Result<Value, String> {
     if cluster_id != SHARED_CLUSTER_ID { return Err("The selected ComputePool cluster is no longer active. Return to Session dashboard and reconnect.".into()); }
     if namespace.is_empty() || namespace.len() > 63 || !namespace.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
         || pod_name.is_empty() || pod_name.len() > 63 || !pod_name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
         return Err("The pod name or namespace is invalid.".into());
     }
-    let mut args = vec!["exec", "--namespace", namespace.as_str(), pod_name.as_str()];
-    if let Some(container) = container.as_deref() { args.extend(["--container", container]); }
-    args.extend(["--", "sh", "-lc", "printf 'pod shell ready\\n'"]);
-    let mut last_error = String::new();
-    // Kubelet retries image pulls with exponential backoff. Keep the pod alive
-    // long enough for transient registry/DNS/TLS failures to recover instead
-    // of deleting it after a short startup timeout.
-    for attempt in 0..60 {
-        let output = cluster_output(&cluster_id, &args).ok_or_else(|| "Docker could not open the pod shell. Confirm Docker Desktop is running and the ComputePool K3s container is available.".to_string())?;
-        if output.status.success() {
-            return Ok(json!({"shellId": format!("pod:{cluster_id}:{namespace}:{pod_name}:{}", container.unwrap_or_default())}));
-        }
-        last_error = output_text(&output);
-        let transient = {
-            let message = last_error.to_lowercase();
-            message.contains("pod does not exist") || message.contains("unable to upgrade connection")
-                || message.contains("container not found") || message.contains("container is not running")
-                || message.contains("connection refused") || message.contains("timed out")
-                || message.contains("imagepullbackoff") || message.contains("errimagepull")
-                || message.contains("containercreating") || message.contains("waiting to start")
-        };
-        if !transient || attempt == 59 { break; }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+    let pod_output = cluster_output(&cluster_id, &["get", "pod", "--namespace", namespace.as_str(), pod_name.as_str(), "-o", "json"])
+        .ok_or_else(|| "Docker could not reach the ComputePool Kubernetes API. Confirm Docker Desktop and the session are running.".to_string())?;
+    if !pod_output.status.success() { return Err(format!("Could not inspect pod {namespace}/{pod_name}: {}", output_text(&pod_output))); }
+    let pod: Value = serde_json::from_slice(&pod_output.stdout).map_err(|e| format!("Kubernetes returned invalid pod status: {e}"))?;
+    let phase = pod.pointer("/status/phase").and_then(Value::as_str).unwrap_or("Unknown");
+    if phase != "Running" {
+        let waiting = pod.pointer("/status/containerStatuses/0/state/waiting");
+        let reason = waiting.and_then(|state| state.get("reason")).and_then(Value::as_str).unwrap_or(phase);
+        let detail = waiting.and_then(|state| state.get("message")).and_then(Value::as_str).unwrap_or("");
+        return Err(format!("Pod {namespace}/{pod_name} is not ready for a terminal yet ({reason}). {}Refresh pods after it reaches Running.", if detail.is_empty() { String::new() } else { format!("{detail} ") }));
     }
-    let status = cluster_output(&cluster_id, &["get", "pod", "--namespace", namespace.as_str(), pod_name.as_str(), "-o", "json"])
-        .filter(|output| output.status.success()).and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok()).map(|pod| {
-            let phase = pod.pointer("/status/phase").and_then(Value::as_str).unwrap_or("unknown");
-            let node = pod.pointer("/spec/nodeName").and_then(Value::as_str).unwrap_or("not scheduled");
-            let container = pod.pointer("/status/containerStatuses/0/state/waiting");
-            let reason = container.and_then(|state| state.get("reason")).and_then(Value::as_str).unwrap_or("none");
-            let detail = container.and_then(|state| state.get("message")).and_then(Value::as_str).unwrap_or("");
-            format!("phase={phase}, node={node}, reason={reason}{}", if detail.is_empty() { String::new() } else { format!(", detail={detail}") })
-        });
-    let events = cluster_output(&cluster_id, &["get", "events", "--namespace", namespace.as_str(), "--field-selector", &format!("involvedObject.name={pod_name}"), "--sort-by=.lastTimestamp"])
-        .filter(|output| output.status.success()).map(|output| output_text(&output)).filter(|text| !text.is_empty());
-    Err(format!("Pod {namespace}/{pod_name} is kept running its image-pull retries; the terminal is not connected yet. Last exec error: {}. Current pod: {}. Recent Kubernetes events: {}. Use Reconnect terminal after registry access recovers.", last_error.trim(), status.unwrap_or_else(|| "status unavailable".into()), events.unwrap_or_else(|| "none returned".into())))
+
+    let container_statuses = pod.pointer("/status/containerStatuses").and_then(Value::as_array).ok_or("Kubernetes has not reported a running pod container yet. Retry the connection shortly.")?;
+    let selected_status = container.as_deref().and_then(|name| container_statuses.iter().find(|status| status.get("name").and_then(Value::as_str) == Some(name)))
+        .or_else(|| container_statuses.first()).ok_or("Kubernetes has not reported a running pod container yet. Retry the connection shortly.")?;
+    let container_id = selected_status.get("containerID").and_then(Value::as_str).and_then(|id| id.strip_prefix("containerd://"))
+        .ok_or("Kubernetes has not assigned a container runtime ID yet. Retry the connection shortly.")?;
+    let pod_node = pod.pointer("/spec/nodeName").and_then(Value::as_str).unwrap_or_default();
+    let local_node = docker_output(&["exec", K3S_SERVER_CONTAINER, "hostname"])
+        .filter(|output| output.status.success()).map(|output| output_text(&output).trim().to_string());
+    let local_pod = local_node.as_deref() == Some(pod_node);
+    // If this laptop is both the consumer and provider, both K3s nodes can
+    // advertise the same NetBird IP. In that case the apiserver's kubelet
+    // proxy reaches the control-plane container even for a worker pod. When
+    // the provider agent is also local, exec through that agent's own CRI.
+    let active_session = ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock()
+        .map_err(|_| "Session state is unavailable.")?.clone();
+    let local_worker_agent = active_session.as_ref().and_then(|active| {
+        let provider = active.get("providers")?.as_array()?.iter()
+            .find(|entry| entry.get("node").and_then(Value::as_str) == Some(pod_node))?
+            .get("provider")?;
+        let provider_ip = provider.get("netbirdIp").and_then(Value::as_str)?;
+        let consumer_ip = active.get("serverIp").and_then(Value::as_str)?;
+        if provider_ip != consumer_ip { return None; }
+        let session_id = active.get("sessionId").and_then(Value::as_str)?;
+        let container = format!("cp-agent-{session_id}");
+        let running = docker_output(&["inspect", "--format", "{{.State.Running}}", &container])
+            .is_some_and(|output| output.status.success() && output_text(&output).trim() == "true");
+        running.then_some(container)
+    });
+    let container_name = selected_status.get("name").and_then(Value::as_str).unwrap_or("shell");
+    let probe = if local_pod {
+        docker_output(&["exec", K3S_SERVER_CONTAINER, "crictl", "exec", "--sync", container_id, "sh", "-lc", "printf COMPUTEPOOL_SHELL_READY"])
+    } else if let Some(agent) = local_worker_agent.as_deref() {
+        docker_output(&["exec", agent, "crictl", "exec", "--sync", container_id, "sh", "-lc", "printf COMPUTEPOOL_SHELL_READY"])
+    } else {
+        server_kubectl(&["exec", "--namespace", namespace.as_str(), "--container", container_name, pod_name.as_str(), "--", "sh", "-lc", "printf COMPUTEPOOL_SHELL_READY"])
+    }.ok_or_else(|| format!("Could not start a shell probe for {namespace}/{pod_name}. Retry the connection."))?;
+    if !probe.status.success() {
+        return Err(format!("Kubernetes could not attach to {namespace}/{pod_name}: {}", output_text(&probe).trim()));
+    }
+
+    let shell_id = uuid::Uuid::new_v4().to_string();
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system.openpty(portable_pty::PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| format!("Could not create the Windows terminal: {e}"))?;
+    #[cfg(windows)]
+    let docker_binary = docker_cli_candidates().into_iter().next().unwrap_or_else(|| "docker.exe".into());
+    #[cfg(not(windows))]
+    let docker_binary = "docker".to_string();
+    let mut command = portable_pty::CommandBuilder::new(docker_binary);
+    if local_pod {
+        // The local K3s node and a provider can advertise the same NetBird IP
+        // when this laptop is also registered as a provider. Kubernetes exec
+        // can then reach the other kubelet and report that this local pod is
+        // missing. CRI exec targets the exact local container and avoids that
+        // ambiguous network hop.
+        command.args(["exec", "-it", K3S_SERVER_CONTAINER, "crictl", "exec", "--interactive", "--tty", container_id, "sh"]);
+    } else if let Some(agent) = local_worker_agent.as_deref() {
+        command.args(["exec", "-it", agent, "crictl", "exec", "--interactive", "--tty", container_id, "sh"]);
+    } else {
+        // Remote worker pods still use the Kubernetes exec proxy over NetBird.
+        command.args(["exec", "-it", K3S_SERVER_CONTAINER, "kubectl", "exec", "--stdin", "--tty", "--namespace", namespace.as_str(), "--container", container_name, pod_name.as_str(), "--", "sh"]);
+    }
+    let child = pair.slave.spawn_command(command).map_err(|e| format!("Could not start the live pod terminal: {e}"))?;
+    drop(pair.slave);
+    let reader = pair.master.try_clone_reader().map_err(|e| format!("Could not read the pod terminal: {e}"))?;
+    let writer = pair.master.take_writer().map_err(|e| format!("Could not write to the pod terminal: {e}"))?;
+    POD_TERMINALS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Pod terminal state is unavailable.")?.insert(shell_id.clone(), PodTerminalSession { child, master: pair.master, writer });
+    stream_pod_terminal_output(reader, app.clone(), shell_id.clone(), "tty");
+    let _ = app.emit("pod-terminal-output", json!({"shellId":shell_id,"stream":"system","data":format!("Connected to {namespace}/{pod_name} · {}\r\n", container.as_deref().unwrap_or("default container"))}));
+    Ok(json!({"shellId": shell_id}))
+}
+
+fn stream_pod_terminal_output<R: std::io::Read + Send + 'static>(stream: R, app: AppHandle, shell_id: String, stream_name: &'static str) {
+    use std::io::Read;
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stream); let mut buffer = [0_u8; 4096];
+        loop { match reader.read(&mut buffer) { Ok(0) | Err(_) => break, Ok(count) => { let data = String::from_utf8_lossy(&buffer[..count]).to_string(); let _ = app.emit("pod-terminal-output", json!({"shellId":shell_id,"stream":stream_name,"data":data})); } } }
+    });
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn write_pod_terminal_input(shell_id: String, data: String) -> Result<(), String> {
+    if data.len() > 16_000 { return Err("Terminal input exceeds the 16000-byte limit.".into()); }
+    let mut terminals = POD_TERMINALS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Pod terminal state is unavailable.")?;
+    let terminal = terminals.get_mut(&shell_id).ok_or("Pod terminal is disconnected. Reconnect to continue.")?;
+    terminal.writer.write_all(data.as_bytes()).map_err(|e| format!("Could not send input to the pod terminal: {e}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn resize_pod_terminal(shell_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    let terminals = POD_TERMINALS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Pod terminal state is unavailable.")?;
+    let terminal = terminals.get(&shell_id).ok_or("Pod terminal is disconnected. Reconnect to continue.")?;
+    terminal.master.resize(portable_pty::PtySize { rows: rows.clamp(1, 200), cols: cols.clamp(1, 500), pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("Could not resize the pod terminal: {e}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn close_pod_terminal(shell_id: String) -> Result<(), String> {
+    if let Some(mut terminal) = POD_TERMINALS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Pod terminal state is unavailable.")?.remove(&shell_id) { let _ = terminal.child.kill(); }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2076,7 +2196,8 @@ async fn list_batch_jobs(cluster_id: String) -> Result<Vec<Value>, String> {
         let total = spec["completions"].as_u64().unwrap_or(1).max(1);
         let phase = if status["failed"].as_u64().unwrap_or(0) > 0 { "failed" } else if completed >= total { "completed" } else if status["active"].as_u64().unwrap_or(0) > 0 { "running" } else { "queued" };
         let selector = spec.pointer("/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/0/matchExpressions/0/values").cloned().unwrap_or(json!([]));
-        json!({"id":name,"name":meta.pointer("/annotations/computepool.io~1display-name").and_then(Value::as_str).unwrap_or(name),"image":job.pointer("/spec/template/spec/containers/0/image").and_then(Value::as_str).unwrap_or_default(),"imagePullPolicy":job.pointer("/spec/template/spec/containers/0/imagePullPolicy"),"status":phase,"nodeIds":selector,"cpuCores":job.pointer("/spec/template/spec/containers/0/resources/requests/cpu").and_then(Value::as_str).unwrap_or("1").parse::<f32>().unwrap_or(1.0),"memoryBytes":job.pointer("/spec/template/spec/containers/0/resources/requests/memory").and_then(Value::as_str).map(|s| parse_quantity_bytes(s).unwrap_or(0)).unwrap_or(0),"gpuCount":job.pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu").and_then(Value::as_str).and_then(|v|v.parse::<u32>().ok()).unwrap_or(0),"replicas":spec["parallelism"],"createdAt":meta["creationTimestamp"],"progressPercent":(completed.saturating_mul(100)/total).min(100),"error":status.pointer("/conditions/0/message")})
+        let labels = meta.get("labels").cloned().unwrap_or(Value::Null);
+        json!({"id":name,"name":meta.pointer("/annotations/computepool.io~1display-name").and_then(Value::as_str).unwrap_or(name),"image":job.pointer("/spec/template/spec/containers/0/image").and_then(Value::as_str).unwrap_or_default(),"imagePullPolicy":job.pointer("/spec/template/spec/containers/0/imagePullPolicy"),"status":phase,"nodeIds":selector,"cpuCores":job.pointer("/spec/template/spec/containers/0/resources/requests/cpu").and_then(Value::as_str).unwrap_or("1").parse::<f32>().unwrap_or(1.0),"memoryBytes":job.pointer("/spec/template/spec/containers/0/resources/requests/memory").and_then(Value::as_str).map(|s| parse_quantity_bytes(s).unwrap_or(0)).unwrap_or(0),"gpuCount":job.pointer("/spec/template/spec/containers/0/resources/requests/nvidia.com~1gpu").and_then(Value::as_str).and_then(|v|v.parse::<u32>().ok()).unwrap_or(0),"replicas":spec["parallelism"],"createdAt":meta["creationTimestamp"],"progressPercent":(completed.saturating_mul(100)/total).min(100),"error":status.pointer("/conditions/0/message"),"workloadType":if labels.get("computepool.io/type").and_then(Value::as_str)==Some("benchmark"){"benchmark"}else{"distributed"},"benchmarkId":labels.get("computepool.io/benchmark-id"),"benchmarkNode":labels.get("computepool.io/benchmark-node")})
     }).collect();
     // Job state alone says whether work is queued or complete, but not why a
     // pod is waiting or which worker received it. Read the controller pods on
@@ -2092,6 +2213,7 @@ async fn list_batch_jobs(cluster_id: String) -> Result<Vec<Value>, String> {
                     .unwrap_or_default();
                 for job in &mut jobs {
                     let id = job["id"].as_str().unwrap_or_default();
+                    let job_created_at = job["createdAt"].clone();
                     let matched = all_pods.iter().filter(|pod| pod.pointer("/metadata/labels/job-name").and_then(Value::as_str) == Some(id)).map(|pod| {
                         let statuses = pod.pointer("/status/containerStatuses").and_then(Value::as_array).cloned().unwrap_or_default();
                         let waiting = statuses.iter().find_map(|status| status.pointer("/state/waiting").filter(|value| !value.is_null()));
@@ -2118,7 +2240,19 @@ async fn list_batch_jobs(cluster_id: String) -> Result<Vec<Value>, String> {
                             let message = event.get("message").and_then(Value::as_str).unwrap_or_default();
                             format!("{event_type} · {event_reason}{count}: {message}")
                         }).collect::<Vec<_>>();
-                        json!({"name":pod.pointer("/metadata/name").cloned().unwrap_or(Value::Null),"phase":phase,"nodeName":pod.pointer("/spec/nodeName").cloned().unwrap_or(Value::Null),"ready":ready,"reason":reason,"detail":detail,"restartCount":restarts,"logs":logs,"events":events,"imagePullPolicy":pod.pointer("/spec/containers/0/imagePullPolicy")})
+                        let scheduled_at = pod.pointer("/status/conditions").and_then(Value::as_array).into_iter().flatten().find(|condition| condition.get("type").and_then(Value::as_str)==Some("PodScheduled") && condition.get("status").and_then(Value::as_str)==Some("True")).and_then(|condition| condition.get("lastTransitionTime")).cloned();
+                        let container_status = statuses.first();
+                        let started_at = container_status.and_then(|status| status.pointer("/state/running/startedAt").or_else(|| status.pointer("/state/terminated/startedAt"))).cloned();
+                        let finished_at = container_status.and_then(|status| status.pointer("/state/terminated/finishedAt")).cloned();
+                        let elapsed_ms = |start: &Value, end: &Value| -> Option<u64> {
+                            let start = chrono::DateTime::parse_from_rfc3339(start.as_str()?).ok()?;
+                            let end = chrono::DateTime::parse_from_rfc3339(end.as_str()?).ok()?;
+                            u64::try_from((end - start).num_milliseconds()).ok()
+                        };
+                        let schedule_ms = scheduled_at.as_ref().and_then(|scheduled| elapsed_ms(&job_created_at, scheduled));
+                        let run_ms = started_at.as_ref().zip(finished_at.as_ref()).and_then(|(started, finished)| elapsed_ms(started, finished));
+                        let total_ms = finished_at.as_ref().and_then(|finished| elapsed_ms(&job_created_at, finished));
+                        json!({"name":pod.pointer("/metadata/name").cloned().unwrap_or(Value::Null),"phase":phase,"nodeName":pod.pointer("/spec/nodeName").cloned().unwrap_or(Value::Null),"ready":ready,"reason":reason,"detail":detail,"restartCount":restarts,"logs":logs,"events":events,"imagePullPolicy":pod.pointer("/spec/containers/0/imagePullPolicy"),"scheduledAt":scheduled_at,"startedAt":started_at,"finishedAt":finished_at,"scheduleMs":schedule_ms,"runMs":run_ms,"totalMs":total_ms})
                     }).collect::<Vec<_>>();
                     job["pods"] = json!(matched);
                 }
@@ -2150,6 +2284,94 @@ async fn list_batch_jobs(cluster_id: String) -> Result<Vec<Value>, String> {
         }
     }
     Ok(jobs)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn run_worker_benchmark(cluster_id: String, node_ids: Vec<String>) -> Result<Vec<Value>, String> {
+    if cluster_id != SHARED_CLUSTER_ID { return Err("Benchmarks run only on the active shared ComputePool cluster.".into()); }
+    if node_ids.is_empty() || node_ids.len() > 32 { return Err("Select between 1 and 32 ready cluster nodes.".into()); }
+    let active = ACTIVE_COMPUTE_SESSION.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "Session state is unavailable.")?.clone().ok_or("No active ComputePool session is available.")?;
+    if active.get("clusterId").and_then(Value::as_str) != Some(cluster_id.as_str()) { return Err("The active ComputePool session does not match this cluster.".into()); }
+    let snapshot = get_cluster_snapshot(Some(cluster_id.clone())).await?;
+    let ready_nodes = snapshot.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default().into_iter()
+        .filter(|node| node["status"] == "ready").filter_map(|node| node["id"].as_str().map(ToOwned::to_owned)).collect::<Vec<_>>();
+    let mut selected = Vec::new();
+    for node in node_ids {
+        if !ready_nodes.contains(&node) { return Err(format!("Node {node} is no longer Ready. Refresh live status and select ready cluster nodes.")); }
+        if !selected.contains(&node) { selected.push(node); }
+    }
+    if selected.len() > 32 { return Err("Select no more than 32 cluster nodes for one benchmark.".into()); }
+
+    let benchmark_id = format!("cp-bench-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+    const IMAGE: &str = "python:3.12-alpine";
+    const SCRIPT: &str = r#"import json, os, platform, socket, statistics, threading, time
+node=os.environ['COMPUTEPOOL_NODE']; pod=os.environ.get('POD_NAME','unknown'); pod_ip=os.environ.get('POD_IP','')
+server=socket.socket(); server.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); server.bind(('0.0.0.0',47831)); server.listen(); server.settimeout(1)
+def serve():
+  while True:
+    try: conn,_=server.accept(); conn.sendall(node.encode()); conn.close()
+    except socket.timeout: pass
+threading.Thread(target=serve,daemon=True).start()
+time.sleep(2)
+values=list(range(2400,0,-1)); t=time.perf_counter()
+for end in range(len(values)-1,0,-1):
+  changed=False
+  for i in range(end):
+    if values[i]>values[i+1]: values[i],values[i+1]=values[i+1],values[i]; changed=True
+  if not changed: break
+bubble=time.perf_counter()-t
+assert values==sorted(values)
+t=time.perf_counter(); limit=t+1.0; candidate=2; primes=0
+while time.perf_counter()<limit:
+  if all(candidate%d for d in range(2,int(candidate**0.5)+1)): primes+=1
+  candidate+=1
+cpu_s=time.perf_counter()-t
+buf=bytearray(64*1024*1024); t=time.perf_counter()
+for _ in range(4):
+  for i in range(0,len(buf),4096): buf[i:i+4096]=b'\x5a'*min(4096,len(buf)-i)
+mem_s=time.perf_counter()-t; mem_mbs=(len(buf)*4/1048576)/max(mem_s,1e-9)
+source='\n'.join('def generated_%d(x): return x + %d'%(i,i) for i in range(5000))
+compile_times=[]
+for _ in range(5):
+  t=time.perf_counter(); compile(source,'<computepool-benchmark>','exec'); compile_times.append((time.perf_counter()-t)*1000)
+peers=[]; deadline=time.time()+20
+while time.time()<deadline:
+  try:
+    addresses=sorted({x[4][0] for x in socket.getaddrinfo(os.environ['COMPUTEPOOL_PEERS'],47831,type=socket.SOCK_STREAM) if x[0]==socket.AF_INET})
+    if len(addresses)>=int(os.environ['COMPUTEPOOL_WORKER_COUNT']): break
+  except OSError: pass
+  time.sleep(.5)
+for address in addresses:
+  if address==pod_ip: continue
+  samples=[]; peer_name=None
+  for _ in range(8):
+    try:
+      t=time.perf_counter(); conn=socket.create_connection((address,47831),timeout=2); peer_name=conn.recv(256).decode(); conn.close(); samples.append((time.perf_counter()-t)*1000)
+    except OSError: time.sleep(.2)
+  peers.append({'podIp':address,'node':peer_name,'samples':len(samples),'medianRttMs':round(statistics.median(samples),3) if samples else None,'minRttMs':round(min(samples),3) if samples else None})
+print('COMPUTEPOOL_BENCHMARK '+json.dumps({'schema':'computepool.benchmark.v2','executedOnWorker':node,'podName':pod,'podIp':pod_ip,'containerHost':platform.node(),'image':platform.python_version(),'bubbleSortItems':2400,'bubbleSortMs':round(bubble*1000,2),'bubbleSortVerified':values==sorted(values),'cpuPrimeCount':primes,'cpuTestSeconds':round(cpu_s,3),'memoryMiB':64,'memoryWriteMiBs':round(mem_mbs,2),'pythonCompileSourceBytes':len(source),'pythonCompileMedianMs':round(statistics.median(compile_times),2),'pythonCompileRuns':len(compile_times),'peerLatency':peers,'remotePeersMeasured':sum(1 for p in peers if p['samples']),'workerCount':int(os.environ['COMPUTEPOOL_WORKER_COUNT'])},sort_keys=True))
+"#;
+    let peers_service = json!({"apiVersion":"v1","kind":"Service","metadata":{"name":format!("{benchmark_id}-peers"),"namespace":"default","labels":{"app.kubernetes.io/managed-by":"computepool","computepool.io/type":"benchmark","computepool.io/benchmark-id":benchmark_id}},"spec":{"clusterIP":"None","publishNotReadyAddresses":true,"selector":{"computepool.io/benchmark-id":benchmark_id},"ports":[{"name":"latency","port":47831,"targetPort":47831,"protocol":"TCP"}]}});
+    let service_bytes = serde_json::to_vec(&peers_service).map_err(|e| format!("Could not prepare benchmark peer discovery: {e}"))?;
+    let service_output = kubectl_with_input(&["apply", "-f", "-"], &service_bytes)?;
+    if !service_output.status.success() { return Err(format!("Could not create worker benchmark peer discovery: {}", output_text(&service_output))); }
+    let items = selected.iter().enumerate().map(|(index, node)| {
+        let job_id = format!("{benchmark_id}-{}", index + 1);
+        let manifest = json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": job_id, "namespace": "default", "labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/type": "benchmark", "computepool.io/benchmark-id": benchmark_id, "computepool.io/benchmark-node": node}, "annotations": {"computepool.io/display-name": format!("Node benchmark · {node}")}},
+            "spec": {"parallelism": 1, "completions": 1, "backoffLimit": 0,
+                "template": {"metadata": {"labels": {"app.kubernetes.io/managed-by": "computepool", "computepool.io/type": "benchmark", "computepool.io/benchmark-id": benchmark_id, "computepool.io/benchmark-node": node, "job-name": job_id}},
+                    "spec": {"restartPolicy": "Never", "nodeSelector": {"kubernetes.io/hostname": node},
+                        "containers": [{"name": "benchmark", "image": IMAGE, "imagePullPolicy": "IfNotPresent", "command": ["python", "-u", "-c", SCRIPT], "env": [{"name":"COMPUTEPOOL_NODE","value":node},{"name":"COMPUTEPOOL_PEERS","value":format!("{benchmark_id}-peers")},{"name":"COMPUTEPOOL_WORKER_COUNT","value":selected.len().to_string()},{"name":"POD_NAME","valueFrom":{"fieldRef":{"fieldPath":"metadata.name"}}},{"name":"POD_IP","valueFrom":{"fieldRef":{"fieldPath":"status.podIP"}}}], "resources": {"requests": {"cpu": "1", "memory": "192Mi"}, "limits": {"cpu": "1", "memory": "192Mi"}}}]}}}
+        });
+        json!({"id": job_id, "name": format!("Node benchmark · {node}"), "image": IMAGE, "imagePullPolicy": "IfNotPresent", "status": "queued", "nodeIds": [node], "cpuCores": 1, "memoryBytes": 201326592_u64, "gpuCount": 0, "replicas": 1, "createdAt": peer::now_iso(), "progressPercent": 0, "workloadType": "benchmark", "benchmarkId": benchmark_id, "benchmarkNode": node, "manifest": manifest})
+    }).collect::<Vec<_>>();
+    let manifest = json!({"apiVersion": "v1", "kind": "List", "items": items.iter().map(|item| item["manifest"].clone()).collect::<Vec<_>>()});
+    let bytes = serde_json::to_vec(&manifest).map_err(|e| format!("Could not prepare benchmark workloads: {e}"))?;
+    let output = kubectl_with_input(&["apply", "-f", "-"], &bytes)?;
+    if !output.status.success() { return Err(format!("Kubernetes rejected the worker benchmark: {}", output_text(&output))); }
+    Ok(items.into_iter().map(|mut item| { item.as_object_mut().map(|fields| { fields.remove("manifest"); }); item }).collect())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2280,8 +2502,12 @@ pub fn run() {
             connect_netbird,
             list_netbird_peers,
             open_pod_shell,
+            write_pod_terminal_input,
+            resize_pod_terminal,
+            close_pod_terminal,
             execute_pod_shell_command,
             list_running_pods,
+            get_interactive_pod_status,
             create_interactive_pod,
             open_node_shell,
             execute_node_shell_command,
@@ -2315,6 +2541,7 @@ pub fn run() {
             open_node_shell,
             execute_node_shell_command,
             list_batch_jobs,
+            run_worker_benchmark,
             submit_batch_job,
             cancel_batch_job
         ])

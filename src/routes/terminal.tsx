@@ -1,106 +1,175 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { listen } from "@tauri-apps/api/event";
+import { Terminal as XTerm } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Boxes, Cpu, LoaderCircle, MemoryStick, Play, Send, Terminal as TerminalIcon, Trash2, Zap } from "lucide-react";
-import { IconTile, PageHeader, Panel } from "@/components/kit";
+import { ArrowLeft, Cpu, LoaderCircle, MemoryStick, Play, RefreshCw, Terminal as TerminalIcon, Zap } from "lucide-react";
+import { PageHeader, Panel } from "@/components/kit";
 import { ImagePresetPicker } from "@/components/image-presets";
-import { clusterService } from "@/lib/platform";
+import { clusterService, type KubernetesPod } from "@/lib/platform";
+import { SessionToolsTabs } from "@/components/session-tools-tabs";
 
 export const Route = createFileRoute("/terminal")({
-  validateSearch: (search: Record<string, unknown>) => ({ clusterId: typeof search["clusterId"] === "string" ? search["clusterId"] : "" }),
+  validateSearch: (search: Record<string, unknown>) => ({ clusterId: typeof search["clusterId"] === "string" ? search["clusterId"] : "", nodeId: typeof search["nodeId"] === "string" ? search["nodeId"] : "" }),
   head: () => ({ meta: [{ title: "Interactive pod · ComputePool" }] }),
   component: InteractivePod,
 });
 
-type Line = { command?: string; stdout?: string; stderr?: string; exitCode?: number };
+const CREATE_POD = "__create__";
+const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 function InteractivePod() {
-  const { clusterId } = Route.useSearch();
-  const [image, setImage] = useState("");
+  const { clusterId, nodeId } = Route.useSearch();
+  const [pods, setPods] = useState<KubernetesPod[]>([]);
+  const visiblePods = nodeId ? pods.filter((pod) => pod.nodeName === nodeId) : pods;
+  const [selectedPod, setSelectedPod] = useState(CREATE_POD);
+  const [image, setImage] = useState("python:3.12-slim");
   const [namespace, setNamespace] = useState("default");
   const [cpu, setCpu] = useState(2);
   const [memory, setMemory] = useState(4);
   const [gpu, setGpu] = useState(0);
-  const [pod, setPod] = useState<{ namespace: string; name: string; image: string } | null>(null);
   const [shellId, setShellId] = useState<string | null>(null);
-  const [input, setInput] = useState("");
-  const [commandHistory, setCommandHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const [lines, setLines] = useState<Line[]>([]);
+  const [connectedPod, setConnectedPod] = useState<KubernetesPod | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const terminalOutputRef = useRef<HTMLDivElement>(null);
+  const [startupMessage, setStartupMessage] = useState<string | null>(null);
+  const terminalHost = useRef<HTMLDivElement>(null);
+  const terminal = useRef<XTerm | null>(null);
+  const fit = useRef<FitAddon | null>(null);
+  const shellIdRef = useRef<string | null>(null);
+  const openingShell = useRef(false);
+  const cancelWait = useRef(false);
+
+  const refreshPods = async () => {
+    if (!clusterId) return;
+    try {
+      const current = await clusterService.pods(clusterId);
+      setPods(current);
+      setSelectedPod((old) => old === CREATE_POD || current.some((pod) => `${pod.namespace}/${pod.name}` === old && (!nodeId || pod.nodeName === nodeId)) ? old : CREATE_POD);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not load running pods."); }
+  };
+
+  useEffect(() => { void refreshPods(); const timer = window.setInterval(() => void refreshPods(), 5000); return () => window.clearInterval(timer); }, [clusterId, nodeId]);
 
   useEffect(() => {
-    const viewport = terminalOutputRef.current;
-    if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
-  }, [lines, busy]);
+    if (!terminalHost.current) return;
+    const term = new XTerm({ cursorBlink: true, fontFamily: 'Consolas, "Cascadia Mono", "Courier New", monospace', fontSize: 14, lineHeight: 1.25, theme: { background: "#0c0c0c", foreground: "#e6e6e6", cursor: "#f2f2f2", selectionBackground: "#264f78", black: "#0c0c0c", red: "#f14c4c", green: "#23d18b", yellow: "#f5f543", blue: "#3b8eea", magenta: "#d670d6", cyan: "#29b8db", white: "#e5e5e5", brightBlack: "#666", brightRed: "#f14c4c", brightGreen: "#23d18b", brightYellow: "#f5f543", brightBlue: "#3b8eea", brightMagenta: "#d670d6", brightCyan: "#29b8db", brightWhite: "#e5e5e5" }, allowProposedApi: false });
+    const fitAddon = new FitAddon(); term.loadAddon(fitAddon); term.open(terminalHost.current); fitAddon.fit();
+    terminal.current = term; fit.current = fitAddon;
+    const dataHandler = term.onData((data) => { const activeShell = shellIdRef.current; if (activeShell) void clusterService.writePodTerminalInput(activeShell, data).catch((e: unknown) => setError(e instanceof Error ? e.message : "Terminal input failed.")); });
+    const resizeHandler = term.onResize(({ cols, rows }) => { const activeShell = shellIdRef.current; if (activeShell) void clusterService.resizePodTerminal(activeShell, cols, rows).catch(() => undefined); });
+    const observer = new ResizeObserver(() => { try { fitAddon.fit(); } catch { /* Ignore temporary hidden layout. */ } }); observer.observe(terminalHost.current);
+    return () => { observer.disconnect(); dataHandler.dispose(); resizeHandler.dispose(); term.dispose(); terminal.current = null; fit.current = null; };
+  }, []);
 
-  const connectTerminal = async (target: { namespace: string; name: string; image: string }) => {
-    if (!clusterId) throw new Error("Open this tool from a connected ComputePool session.");
-    setShellId(null);
-    const session = await clusterService.openPodShell(clusterId, target.namespace, target.name);
-    setShellId(session.shellId);
-    setLines([{ stdout: `Connected to ${target.namespace}/${target.name}. Image: ${target.image}` }]);
-  };
+  useEffect(() => {
+    let active = true;
+    const dispose = listen<{ shellId: string; stream: string; data: string }>("pod-terminal-output", ({ payload }) => {
+      if (active && (openingShell.current || payload.shellId === shellIdRef.current)) terminal.current?.write(payload.data);
+    });
+    return () => { active = false; void dispose.then((fn) => fn()); };
+  }, []);
 
-  const start = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true); setError(null); setShellId(null); setLines([]);
+  useEffect(() => () => { const activeShell = shellIdRef.current; if (activeShell) void clusterService.closePodTerminal(activeShell); }, []);
+
+  const connect = async (pod: KubernetesPod, retryUntilConnected = false) => {
+    if (!retryUntilConnected) cancelWait.current = false;
+    else setStartupMessage(`Pod ${pod.namespace}/${pod.name} is ready · opening terminal…`);
+    setBusy(true); setError(null);
     try {
-      if (!clusterId) throw new Error("Open this tool from a connected ComputePool session.");
-      if (pod) {
-        await connectTerminal(pod);
-      } else {
-        const created = await clusterService.createInteractivePod(clusterId, { image: image.trim(), cpuCores: cpu, memoryGib: memory, gpuCount: gpu, namespace: namespace.trim() });
-        const target = { namespace: created.namespace, name: created.podName, image: created.image };
-        // Keep the ready pod even when exec needs a moment to become available.
-        // Retrying from this page must reconnect instead of creating duplicates.
-        setPod(target);
-        setLines([{ stdout: `Pod ${target.namespace}/${target.name} is ready. Connecting terminal…` }]);
-        await connectTerminal(target);
+      const previousShell = shellIdRef.current;
+      if (previousShell) await clusterService.closePodTerminal(previousShell);
+      shellIdRef.current = null; openingShell.current = true;
+      setShellId(null); terminal.current?.clear(); setConnectedPod(pod);
+      let session: { shellId: string } | null = null;
+      do {
+        if (cancelWait.current) break;
+        try {
+          session = await clusterService.openPodShell(clusterId, pod.namespace, pod.name, pod.containers[0]);
+        } catch (e) {
+          if (!retryUntilConnected) throw e;
+          if (cancelWait.current) break;
+          setStartupMessage(`Pod is ready. Retrying terminal connection… (${e instanceof Error ? e.message : "waiting for Kubernetes exec"})`);
+          await wait(1500);
+        }
+      } while (!session && retryUntilConnected && !cancelWait.current);
+      openingShell.current = false;
+      if (session) {
+        shellIdRef.current = session.shellId;
+        setConnectedPod(pod); setShellId(session.shellId); setStartupMessage(null);
+        if (terminal.current) void clusterService.resizePodTerminal(session.shellId, terminal.current.cols, terminal.current.rows).catch(() => undefined);
+      } else if (cancelWait.current) {
+        shellIdRef.current = null; setShellId(null); setStartupMessage("Connection canceled. The pod is still running; select it above to connect later.");
+        await refreshPods();
       }
-    } catch (e) { setError(e instanceof Error ? e.message : "Interactive pod was not started."); }
+    } catch (e) { openingShell.current = false; shellIdRef.current = null; setShellId(null); setStartupMessage(null); setError(e instanceof Error ? e.message : "Could not connect to pod."); }
     finally { setBusy(false); }
   };
 
-  const execute = async (command: string) => {
-    if (!shellId || !command.trim()) return;
-    setInput(""); setHistoryIndex(-1); setCommandHistory((history) => [...history, command.trim()].slice(-100)); setBusy(true); setError(null);
-    try { const result = await clusterService.executePodCommand(shellId, command); setLines((all) => [...all, { command, ...result }]); }
-    catch (e) { setError(e instanceof Error ? e.message : "Command was not executed."); }
+  const createPod = async () => {
+    if (!image.trim() || !clusterId) return;
+    setBusy(true); setError(null); setStartupMessage("Creating pod in Kubernetes…"); cancelWait.current = false;
+    try {
+      const created = await clusterService.createInteractivePod(clusterId, { image: image.trim(), cpuCores: cpu, memoryGib: memory, gpuCount: gpu, namespace: namespace.trim(), targetNode: nodeId || undefined });
+      const pod = { namespace: created.namespace, name: created.podName, image: created.image, phase: "Pending", containers: ["shell"], nodeName: created.nodeName ?? nodeId ?? null } satisfies KubernetesPod;
+      setSelectedPod(`${pod.namespace}/${pod.name}`);
+      for (;;) {
+        if (cancelWait.current) break;
+        try {
+          const status = await clusterService.interactivePodStatus(clusterId, pod.namespace, pod.name);
+          const detail = status.waitingReason || status.phase;
+          setStartupMessage(`${pod.namespace}/${pod.name} · ${detail}${status.waitingMessage ? ` — ${status.waitingMessage}` : ""}`);
+          if (status.phase === "Failed") throw new Error(`Pod startup failed (${detail}). ${status.waitingMessage || "Check the pod events and image name, then retry."}`);
+          if (status.phase === "Running" && status.ready) break;
+        } catch (e) {
+          if (e instanceof Error && e.message.startsWith("Pod startup failed")) throw e;
+          setStartupMessage(`${pod.namespace}/${pod.name} · Kubernetes is still starting the pod; retrying status check…`);
+        }
+        await wait(1500);
+      }
+      if (cancelWait.current) {
+        setStartupMessage("Startup canceled. The pod remains in Kubernetes; select it above to connect later.");
+        await refreshPods();
+        return;
+      }
+      await refreshPods();
+      await connect({ ...pod, phase: "Running" }, true);
+    } catch (e) { setStartupMessage(null); setError(e instanceof Error ? e.message : "Could not create pod."); }
     finally { setBusy(false); }
   };
-  const run = (e?: React.FormEvent) => { e?.preventDefault(); void execute(input.trim()); };
+
+  const cancelStartup = () => { cancelWait.current = true; setStartupMessage("Canceling startup…"); };
 
   return <div className="w-full min-w-0">
     <Link to="/cluster" search={{ clusterId }} className="mb-4 inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground"><ArrowLeft className="size-4" />Session dashboard</Link>
-    <PageHeader eyebrow="Interactive compute · Kubernetes pod" title="Pod shell"><Link to="/batch-jobs" search={{ clusterId }} className="inline-flex items-center rounded-xl border border-border px-3 py-2 text-xs font-semibold"><Boxes className="mr-2 size-4" />Distributed workload</Link></PageHeader>
-    <div className="grid items-start gap-4 xl:grid-cols-[minmax(320px,390px)_minmax(0,1fr)]">
-      <Panel className="p-4">
-        <div className="mb-4 flex items-center gap-3"><IconTile icon={Cpu} tone="blue" size="sm" /><div><h2 className="font-bold">Pod configuration</h2><p className="text-xs text-muted-foreground">Choose an image and resource limits.</p></div></div>
-        <form onSubmit={(e) => void start(e)} className="space-y-3">
-          <ImagePresetPicker value={image} onSelect={setImage} compact />
-          <Field label="Container image"><input required value={image} onChange={(e) => setImage(e.target.value)} className="field" placeholder="registry/image:tag" /></Field>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Namespace"><input required value={namespace} onChange={(e) => setNamespace(e.target.value)} className="field" placeholder="default" /></Field>
-            <Field label="NVIDIA GPUs"><input type="number" min={0} max={32} value={gpu} onChange={(e) => setGpu(Math.max(0, Number(e.target.value)))} className="field" /></Field>
-            <Field label="CPU cores"><input type="number" min={1} max={256} value={cpu} onChange={(e) => setCpu(Math.max(1, Number(e.target.value)))} className="field" /></Field>
-            <Field label="Memory (GiB)"><input type="number" min={1} max={4096} value={memory} onChange={(e) => setMemory(Math.max(1, Number(e.target.value)))} className="field" /></Field>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-muted px-3 py-2 text-[11px] text-muted-foreground"><span><Cpu className="mr-1 inline size-3.5" />{cpu} CPU</span><span><MemoryStick className="mr-1 inline size-3.5" />{memory} GiB RAM</span><span><Zap className="mr-1 inline size-3.5" />{gpu} GPU</span></div>
-          <button disabled={busy || (!pod && !image.trim())} className="inline-flex h-10 w-full items-center justify-center rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground disabled:opacity-50">{busy ? <LoaderCircle className="mr-2 size-4 animate-spin" /> : pod ? <TerminalIcon className="mr-2 size-4" /> : <Play className="mr-2 size-4" />}{pod ? shellId ? "Reconnect terminal" : "Connect to existing pod" : "Create pod & connect terminal"}</button>
-        </form>
-        {pod && <div className="mt-3 rounded-xl border border-success/30 bg-success-soft p-3 text-xs"><div className="flex items-center gap-2 font-semibold text-success"><Boxes className="size-4" />Pod ready · {shellId ? "terminal connected" : "terminal disconnected"}</div><p className="mt-1 break-all font-mono">{pod.namespace}/{pod.name}</p><p className="mt-1 break-all text-muted-foreground">{pod.image}</p>{!shellId && <button type="button" disabled={busy} onClick={() => { setBusy(true); setError(null); void connectTerminal(pod).catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not connect to the pod terminal.")).finally(() => setBusy(false)); }} className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-success/30 px-2.5 py-1.5 font-semibold text-success disabled:opacity-50"><TerminalIcon className="size-3.5" />{busy ? "Connecting…" : "Reconnect terminal"}</button>}</div>}
-        <p className="mt-3 text-[11px] leading-4 text-muted-foreground">Pod resources become Kubernetes requests and limits. GPU scheduling requires NVIDIA-enabled workers and the device plugin.</p>
-      </Panel>
-      <Panel className="flex h-[min(72vh,760px)] min-h-[520px] flex-col overflow-hidden border-slate-700 bg-slate-950 p-0 text-slate-100 shadow-lg">
-        <div className="flex min-h-14 items-center gap-3 border-b border-white/10 bg-slate-900 px-4 py-3"><IconTile icon={TerminalIcon} tone="green" size="sm" /><div className="min-w-0"><p className="font-mono text-sm font-semibold">{pod ? `${pod.namespace}/${pod.name}` : "Interactive pod terminal"}</p><p className="text-[10px] text-slate-400">{pod?.image ?? "Kubernetes exec · commands run inside the selected pod"}</p></div><span className={`ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${shellId ? "bg-emerald-400/10 text-emerald-300" : busy ? "bg-blue-400/10 text-blue-300" : "bg-white/10 text-slate-300"}`}><span className={`size-1.5 rounded-full ${shellId ? "bg-emerald-400" : busy ? "animate-pulse bg-blue-400" : "bg-slate-500"}`} />{shellId ? "Connected" : busy ? "Starting" : "Not connected"}</span></div>
-        <div className="flex flex-wrap items-center gap-2 border-b border-white/10 bg-slate-900/60 px-4 py-2"><span className="mr-auto text-[10px] text-slate-400">{shellId ? "Quick commands" : "Start a pod to enable commands"}</span>{shellId && <><button type="button" onClick={() => void execute("pwd")} disabled={busy} className="rounded-lg border border-white/10 px-2.5 py-1 text-[10px] text-slate-300 transition hover:bg-white/10 disabled:opacity-40">pwd</button><button type="button" onClick={() => void execute("ls -la")} disabled={busy} className="rounded-lg border border-white/10 px-2.5 py-1 text-[10px] text-slate-300 transition hover:bg-white/10 disabled:opacity-40">ls -la</button><button type="button" onClick={() => void execute("python --version")} disabled={busy} className="rounded-lg border border-white/10 px-2.5 py-1 text-[10px] text-slate-300 transition hover:bg-white/10 disabled:opacity-40">python --version</button><button type="button" onClick={() => setLines([])} className="rounded-lg border border-white/10 p-1.5 text-slate-400 transition hover:bg-white/10 hover:text-white" title="Clear terminal"><Trash2 className="size-3.5" /></button></>}</div>
-        <div ref={terminalOutputRef} role="log" aria-live="polite" aria-label="Pod terminal output" className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#080d1b] p-4 font-mono text-xs [scrollbar-color:#475569_#080d1b] [scrollbar-width:thin]">{lines.length === 0 && <div className="grid h-full min-h-[250px] place-items-center text-center"><div><IconTile icon={TerminalIcon} tone="green" size="lg" className="mx-auto" /><h3 className="mt-4 font-sans text-base font-semibold text-slate-200">{shellId ? "Shell is ready" : "Your pod shell will appear here"}</h3><p className="mx-auto mt-2 max-w-sm font-sans text-xs leading-5 text-slate-400">{shellId ? "Type a command below, or choose a quick command above." : "Choose a container image, set CPU and memory, then create a pod to connect."}</p></div></div>}{lines.map((line, i) => <div key={`${i}-${line.command ?? "ready"}`} className="border-b border-white/[0.045] py-3 last:border-0"><p className="whitespace-pre-wrap break-words text-emerald-300"><span className="text-cyan-300">{pod?.name ?? "pod"} </span><span className="text-slate-500">$ </span>{line.command}</p>{line.stdout && <pre className="mt-1 whitespace-pre-wrap break-words leading-relaxed text-slate-200">{line.stdout}</pre>}{line.stderr && <pre className="mt-1 whitespace-pre-wrap break-words leading-relaxed text-rose-300">{line.stderr}</pre>}{line.exitCode !== undefined && <p className="mt-1 text-[10px] text-slate-600">exit {line.exitCode}</p>}</div>)}{busy && <p className="flex items-center gap-2 py-3 text-slate-400"><LoaderCircle className="size-3.5 animate-spin" />Running command in pod…</p>}</div>
-        {error && <p className="border-t border-rose-400/20 bg-rose-400/5 px-4 py-2 text-xs text-rose-300">{error}</p>}
-        <form onSubmit={run} className="shrink-0 border-t border-white/10 bg-slate-900 p-3"><div className="flex items-end gap-3 rounded-xl border border-white/10 bg-slate-950 px-3 focus-within:border-blue-400/50 focus-within:ring-2 focus-within:ring-blue-400/10"><span className="pb-3 font-mono text-sm text-emerald-300">$</span><textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); run(); } else if (e.key === "ArrowUp" && !input.includes("\n") && commandHistory.length) { e.preventDefault(); const next = Math.min(historyIndex + 1, commandHistory.length - 1); setHistoryIndex(next); setInput(commandHistory[commandHistory.length - 1 - next] ?? ""); } else if (e.key === "ArrowDown" && historyIndex >= 0) { e.preventDefault(); const next = historyIndex - 1; setHistoryIndex(next); setInput(next < 0 ? "" : commandHistory[commandHistory.length - 1 - next] ?? ""); } }} disabled={!shellId || busy} rows={1} className="max-h-32 min-h-11 min-w-0 flex-1 resize-y border-0 bg-transparent px-1 py-3 font-mono text-xs leading-5 text-white outline-none placeholder:text-slate-500 focus:ring-0 disabled:opacity-50" placeholder={shellId ? "Type a command · Enter to run · Shift+Enter for a new line" : "Waiting for pod connection…"} /><button disabled={!shellId || busy || !input.trim()} className="mb-1 inline-flex h-9 shrink-0 items-center gap-2 rounded-lg bg-blue-500 px-3 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:opacity-40"><Send className="size-4" /><span className="hidden sm:inline">Run</span></button></div><p className="pl-7 pt-2 text-[10px] leading-4 text-slate-500">Up/Down recalls commands. Commands run with <code>sh -lc</code>; each command is a separate process, so chain commands when sharing a working directory or variables.</p></form>
-      </Panel>
-    </div>
+    <PageHeader eyebrow="Interactive compute · live Kubernetes exec" title="Pod terminal" />
+    <SessionToolsTabs clusterId={clusterId} active="pods" />
+
+    <Panel className="mb-4 p-4">
+      <div className="grid items-end gap-3 sm:grid-cols-[minmax(240px,1fr)_auto]">
+        <Field label={nodeId ? `Pod on node · ${nodeId}` : "Start a pod · choose its node"}><select value={selectedPod} onChange={(event) => setSelectedPod(event.target.value)} className="field"><option value={CREATE_POD}>＋ Create a new pod{nodeId ? ` on ${nodeId}` : ""}</option>{visiblePods.map((pod) => <option key={`${pod.namespace}/${pod.name}`} value={`${pod.namespace}/${pod.name}`}>{pod.namespace}/{pod.name} ({pod.image || "image unknown"} · {pod.nodeName || "node pending"})</option>)}</select></Field>
+        {selectedPod === CREATE_POD ? <button type="button" onClick={() => void createPod()} disabled={busy || !image.trim()} className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground disabled:opacity-50">{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}{nodeId ? "Create on this node" : "Create & connect"}</button> : <button type="button" onClick={() => { const pod = visiblePods.find((item) => `${item.namespace}/${item.name}` === selectedPod); if (pod) void connect(pod); }} disabled={busy} className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground disabled:opacity-50">{busy ? <LoaderCircle className="size-4 animate-spin" /> : <TerminalIcon className="size-4" />}Connect to pod</button>}
+      </div>
+      {selectedPod === CREATE_POD && <div className="mt-3 grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(200px,1.5fr)_minmax(130px,1fr)_repeat(3,minmax(82px,.5fr)]">
+        <Field label="Container image"><input value={image} onChange={(event) => setImage(event.target.value)} className="field" placeholder="registry/image:tag" /></Field>
+        <Field label="Namespace"><input value={namespace} onChange={(event) => setNamespace(event.target.value)} className="field" /></Field>
+        <Field label="CPU"><input type="number" min={1} max={256} value={cpu} onChange={(event) => setCpu(Math.max(1, Number(event.target.value)))} className="field" /></Field>
+        <Field label="RAM GiB"><input type="number" min={1} max={4096} value={memory} onChange={(event) => setMemory(Math.max(1, Number(event.target.value)))} className="field" /></Field>
+        <Field label="GPU"><input type="number" min={0} max={32} value={gpu} onChange={(event) => setGpu(Math.max(0, Number(event.target.value)))} className="field" /></Field>
+        <div className="sm:col-span-2 lg:col-span-5"><ImagePresetPicker value={image} onSelect={setImage} compact /></div>
+      </div>}
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground"><span>{visiblePods.length} running pod{visiblePods.length === 1 ? "" : "s"}{nodeId ? ` on ${nodeId}` : ""} · refreshes every 5 sec</span><button type="button" onClick={() => void refreshPods()} className="inline-flex items-center gap-1 rounded-lg px-2 py-1 hover:bg-muted"><RefreshCw className="size-3.5" />Refresh pods</button>{selectedPod === CREATE_POD && <span className="ml-auto inline-flex items-center gap-3"><span><Cpu className="mr-1 inline size-3.5" />{cpu} CPU</span><span><MemoryStick className="mr-1 inline size-3.5" />{memory} GiB</span><span><Zap className="mr-1 inline size-3.5" />{gpu} GPU</span></span>}</div>
+      {startupMessage && <div className="mt-3 flex items-center gap-3 rounded-xl bg-blue-50 px-3 py-2 text-sm text-blue-900"><LoaderCircle className="size-4 shrink-0 animate-spin" /><span className="min-w-0 flex-1 break-words">{startupMessage}</span>{busy && <button type="button" onClick={cancelStartup} className="shrink-0 rounded-lg border border-blue-200 bg-white px-3 py-1.5 font-semibold hover:bg-blue-100">Cancel</button>}</div>}
+    </Panel>
+    {error && <Panel className="mb-3 border-rose-300 bg-rose-50 text-sm text-rose-800">{error}</Panel>}
+
+    <Panel className="overflow-hidden rounded-xl border-[#34363b] bg-[#0c0c0c] p-0 text-[#f2f2f2] shadow-2xl">
+      <div className="flex min-h-11 items-center gap-3 border-b border-[#333] bg-[#202020] px-3"><div className="flex items-center gap-1.5"><span className="size-2.5 rounded-full bg-[#f96057]"/><span className="size-2.5 rounded-full bg-[#f8c04f]"/><span className="size-2.5 rounded-full bg-[#5fcf65]"/></div><div className="ml-2 flex h-8 max-w-[420px] min-w-0 items-center gap-2 rounded-t-lg border border-b-0 border-[#444] bg-[#0c0c0c] px-3 text-xs"><TerminalIcon className="size-3.5 shrink-0 text-[#72d7a0]"/><span className="truncate">{connectedPod ? `${connectedPod.namespace}/${connectedPod.name}` : "Windows Terminal · ComputePool"}</span></div><span className="ml-auto truncate text-[10px] text-[#aaa]">{connectedPod?.image ?? "Select a running pod above"}</span><span className={`ml-2 inline-flex shrink-0 items-center gap-1.5 text-[10px] ${shellId ? "text-[#72d7a0]" : "text-[#aaa]"}`}><span className={`size-1.5 rounded-full ${shellId ? "bg-[#72d7a0]" : "bg-[#888]"}`} />{shellId ? "LIVE" : "DISCONNECTED"}</span></div>
+      <div ref={terminalHost} className="h-[min(70vh,720px)] min-h-[420px] w-full bg-[#0c0c0c] px-3 py-2" />
+      <div className="flex flex-wrap items-center gap-2 border-t border-[#333] bg-[#1b1b1b] px-3 py-2"><span className="mr-auto text-[10px] text-[#888]">Pod shell · commands run in the selected container · output streams live</span>{["pwd", "ls -la", "python --version"].map((command) => <button key={command} type="button" disabled={!shellId} onClick={() => void clusterService.writePodTerminalInput(shellId!, `${command}\r`)} className="rounded-md border border-white/10 px-2.5 py-1 text-[10px] text-[#ccc] hover:bg-white/10 disabled:opacity-40">{command}</button>)}</div>
+    </Panel>
+    <p className="mt-3 text-xs text-muted-foreground">Run programs in the pod’s actual shell. Commands such as <code>top</code>, <code>ping</code>, or your own FPS/progress reporter stay attached and stream updates live until you stop them.</p>
   </div>;
 }
 

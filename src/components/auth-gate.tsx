@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Boxes, LoaderCircle, LogOut, ShieldCheck } from "lucide-react";
 import { authService, isTauri, type AuthStatus } from "@/lib/platform";
 import { Panel } from "@/components/kit";
+import { BrandLogo } from "@/components/brand-logo";
 
 export function AuthGate({ children }: { children: (props: { username: string; signOut: () => Promise<void> }) => ReactNode }) {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
@@ -47,7 +48,7 @@ export function AuthGate({ children }: { children: (props: { username: string; s
   if (auth?.authenticated && auth.username) return children({ username: auth.displayName || auth.username, signOut });
 
   return <div className="grid min-h-screen place-items-center bg-background px-4 py-10"><Panel className="w-full max-w-md p-7">
-    <div className="mb-6 flex items-center gap-3"><span className="grid size-11 place-items-center rounded-2xl bg-primary text-primary-foreground"><Boxes className="size-6" /></span><div><p className="font-display text-xl font-bold">ComputePool</p><p className="text-xs text-muted-foreground">Phase 1 · Cognito and desktop discovery</p></div></div>
+    <div className="mb-6 flex items-center gap-3"><BrandLogo className="size-12 rounded-2xl"/><div><p className="font-display text-xl font-bold">ComputePool</p><p className="text-xs text-muted-foreground">Phase 1 · Cognito and desktop discovery</p></div></div>
     <div className="mb-5 flex items-start gap-3 rounded-2xl bg-muted p-4"><ShieldCheck className="mt-0.5 size-5 shrink-0 text-primary" /><div><h1 className="font-semibold">Sign in to your account</h1><p className="mt-1 text-sm text-muted-foreground">Amazon Cognito · ap-south-1</p></div></div>
     {error && <p role="alert" className="mb-4 whitespace-pre-line rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
     <button type="button" onClick={() => void beginSignIn()} disabled={busy || !isTauri() || !listenersReady} className="inline-flex h-11 w-full items-center justify-center rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground disabled:opacity-50">{busy && <LoaderCircle className="mr-2 size-4 animate-spin" />}{busy ? "Waiting for Cognito…" : "Continue with Amazon Cognito"}</button>

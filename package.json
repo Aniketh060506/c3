@@ -54,6 +54,8 @@
     "@tanstack/router-plugin": "1.168.42",
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -77,9 +79,9 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.12.4",
     "@eslint/js": "^9.32.0",
     "@lovable.dev/vite-tanstack-config": "2.26.5",
+    "@tauri-apps/cli": "^2.12.4",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.0.0",
     "@types/node": "^22.16.5",

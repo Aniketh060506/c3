@@ -25,9 +25,10 @@ export type SessionSetup = { sessionId: string; clusterId: string };
 export type IncomingRequest = { id: string; consumer: string; requestedLimits: ProviderLimits; durationMinutes: number; workloadDescription?: string; createdAt: string };
 export type ProviderStatus = { online: boolean; activeSessions: number; capturedAt: string; connectionError?: string; limits?: { cpuCores?: number; memoryBytes?: number; gpuIds?: string[] } };
 export type ProviderSessionMetric = { id: string; consumer: string; state: "accepted" | "starting" | "active" | "stopping" | "disconnected"; startedAt: string; containerName?: string; telemetryAvailable?: boolean; requestedCpuCores?: number | null; requestedMemoryBytes?: number | null; requestedGpuIds?: string[]; durationMinutes?: number | null; workloadDescription?: string | null; cpuPercent?: number | null; memoryBytes?: number | null; memoryLimitBytes?: number | null; memoryPercent?: number | null; networkRxBytes?: number | null; networkTxBytes?: number | null; blockReadBytes?: number | null; blockWriteBytes?: number | null; processCount?: number | null; gpuPercent?: number | null };
-export type BatchPodStatus = { name: string; phase: string; nodeName?: string | null; ready: boolean; reason: string; detail?: string | null; restartCount: number; logs?: string | null; events?: string[]; imagePullPolicy?: string | null };
-export type BatchJob = { id: string; name: string; image: string; imagePullPolicy?: string; status: "submitted" | "queued" | "scheduled" | "starting" | "running" | "completed" | "failed" | "cancelled"; nodeIds: string[]; cpuCores: number; memoryBytes: number; gpuCount?: number; replicas?: number; progressPercent?: number; outputSync?: "pending" | "completed" | "failed"; createdAt: string; error?: string; pods?: BatchPodStatus[] };
-export type KubernetesPod = { namespace: string; name: string; phase: string; containers: string[] };
+export type BatchPodStatus = { name: string; phase: string; nodeName?: string | null; ready: boolean; reason: string; detail?: string | null; restartCount: number; logs?: string | null; events?: string[]; imagePullPolicy?: string | null; scheduledAt?: string | null; startedAt?: string | null; finishedAt?: string | null; scheduleMs?: number | null; runMs?: number | null; totalMs?: number | null };
+export type BatchJob = { id: string; name: string; image: string; imagePullPolicy?: string; workloadType?: "distributed" | "benchmark"; benchmarkId?: string; benchmarkNode?: string; status: "submitted" | "queued" | "scheduled" | "starting" | "running" | "completed" | "failed" | "cancelled"; nodeIds: string[]; cpuCores: number; memoryBytes: number; gpuCount?: number; replicas?: number; progressPercent?: number; outputSync?: "pending" | "completed" | "failed"; createdAt: string; error?: string; pods?: BatchPodStatus[] };
+export type KubernetesPod = { namespace: string; name: string; phase: string; containers: string[]; image: string; nodeName?: string | null };
+export type InteractivePodStatus = { phase: string; ready: boolean; waitingReason?: string | null; waitingMessage?: string | null; restarts: number; nodeName?: string | null; podIp?: string | null; startedAt?: string | null; usage: string; conditions: Array<{ type?: string; status?: string; reason?: string; message?: string }> };
 export type NetBirdPeer = { id: string; displayName: string; netbirdIp?: string; connected: boolean; connectionType?: string };
 export type NetBirdStatus = { installed: boolean; connected: boolean; status: "connected" | "disconnected" | "starting" | "not_running" | "missing" | string; version?: string; peerIp?: string };
 export type AuthStatus = { authenticated: boolean; username?: string; displayName?: string; expiresAt?: number };
@@ -47,7 +48,7 @@ export const nativeActivity = {
   label: () => {
     const commands = [...longNativeRequests].map((id) => nativeRequests.get(id)).filter((value): value is string => Boolean(value));
     const command = commands.at(-1);
-    const friendly: Record<string, string> = { start_compute_session: "Connecting cluster nodes", get_cluster_snapshot: "Refreshing cluster status", open_node_shell: "Opening provider shell", execute_node_shell_command: "Running provider command", create_interactive_pod: "Starting Kubernetes pod", open_pod_shell: "Opening pod shell", submit_batch_job: "Submitting batch workload", end_compute_session: "Ending compute session", get_hardware: "Refreshing machine telemetry", check_dependencies: "Checking machine readiness" };
+    const friendly: Record<string, string> = { start_compute_session: "Connecting cluster nodes", get_cluster_snapshot: "Refreshing cluster status", open_node_shell: "Opening provider shell", execute_node_shell_command: "Running provider command", create_interactive_pod: "Starting Kubernetes pod", open_pod_shell: "Opening pod shell", run_worker_benchmark: "Starting worker benchmarks", submit_batch_job: "Submitting batch workload", end_compute_session: "Ending compute session", get_hardware: "Refreshing machine telemetry", check_dependencies: "Checking machine readiness" };
     return command ? (friendly[command] ?? "Waiting for ComputePool services") : "";
   },
 };
@@ -128,10 +129,15 @@ export const clusterService = {
   openShell: (clusterId: string, nodeId: string) => invoke<{ shellId: string; peerName: string; peerIp: string; stdout: string }>("open_node_shell", { clusterId, nodeId }),
   executeShellCommand: (shellId: string, command: string) => invoke<{ stdout: string; stderr: string; exitCode: number }>("execute_node_shell_command", { shellId, command }),
   pods: (clusterId: string) => invoke<KubernetesPod[]>("list_running_pods", { clusterId }),
-  createInteractivePod: (clusterId: string, spec: { image: string; cpuCores: number; memoryGib: number; gpuCount: number; namespace: string }) => invoke<{ namespace: string; podName: string; image: string; cpuCores: number; memoryGib: number; gpuCount: number }>("create_interactive_pod", { clusterId, ...spec }),
+  createInteractivePod: (clusterId: string, spec: { image: string; cpuCores: number; memoryGib: number; gpuCount: number; namespace: string; targetNode?: string }) => invoke<{ namespace: string; podName: string; image: string; cpuCores: number; memoryGib: number; gpuCount: number; nodeName?: string | null }>("create_interactive_pod", { clusterId, ...spec }),
   openPodShell: (clusterId: string, namespace: string, podName: string, container?: string) => invoke<{ shellId: string }>("open_pod_shell", { clusterId, namespace, podName, container }),
+  writePodTerminalInput: (shellId: string, data: string) => invoke<void>("write_pod_terminal_input", { shellId, data }),
+  resizePodTerminal: (shellId: string, cols: number, rows: number) => invoke<void>("resize_pod_terminal", { shellId, cols, rows }),
+  closePodTerminal: (shellId: string) => invoke<void>("close_pod_terminal", { shellId }),
+  interactivePodStatus: (clusterId: string, namespace: string, podName: string) => invoke<InteractivePodStatus>("get_interactive_pod_status", { clusterId, namespace, podName }),
   executePodCommand: (shellId: string, command: string) => invoke<{ stdout: string; stderr: string; exitCode: number }>("execute_pod_shell_command", { shellId, command }),
   batchJobs: (clusterId: string) => invoke<BatchJob[]>("list_batch_jobs", { clusterId }),
+  runWorkerBenchmark: (clusterId: string, nodeIds: string[]) => invoke<BatchJob[]>("run_worker_benchmark", { clusterId, nodeIds }),
   submitBatchJob: (clusterId: string, spec: { name: string; image: string; command: string; cpuCores: number; memoryBytes: number; gpuCount: number; replicas: number; inputFolder: string; outputFolder: string; nodeIds: string[] }) => invoke<BatchJob>("submit_batch_job", { clusterId, spec }),
   cancelBatchJob: (jobId: string) => invoke<void>("cancel_batch_job", { jobId }),
 };
